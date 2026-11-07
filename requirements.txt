@@ -3,3 +3,4 @@ yfinance>=0.2.54
 plotly>=5.21
 pandas>=2.0
 numpy>=1.24
+opencc-python-reimplemented>=0.1.7

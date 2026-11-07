@@ -252,6 +252,7 @@ __MA_SWATCHES__
   box-shadow: var(--qk-shadow); }
 .qk-quote { padding: 18px 20px; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
 .qk-q-name { font-size: 1.4375rem; font-weight: 700; line-height: 1.3; color: var(--qk-text); }
+.qk-q-en { font-size: .8125rem; font-weight: 400; color: var(--qk-muted); margin-left: 10px; }
 .qk-q-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .qk-tag { font-size: .75rem; border-radius: 6px; padding: 2px 8px; background: var(--qk-card2);
   border: 1px solid var(--qk-border); color: var(--qk-muted); white-space: nowrap; }
@@ -450,15 +451,164 @@ def fetch_history(symbol: str, interval: str, period: str, adjusted: bool):
     return df, datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+# ------------------------------------------------------------------
+# 3-1 中文股票名稱查詢
+#   台股：證交所 / 櫃買中心 OpenAPI（官方中文簡稱）→ Yahoo 奇摩股市頁面標題
+#   其他：內建常用中文名稱 → Yahoo 奇摩股市（若有中文）→ Wikidata 正體中文標籤 → 英文名稱
+# ------------------------------------------------------------------
+HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (QuantumK student research app)"}
+
+# 常見海外標的中文名稱（官方或台灣慣用譯名）
+CN_NAMES = {
+    # 指數
+    "^TWII": "台灣加權指數", "^TWOII": "櫃買指數", "^GSPC": "標普 500 指數", "^DJI": "道瓊工業指數",
+    "^IXIC": "那斯達克綜合指數", "^NDX": "那斯達克 100 指數", "^SOX": "費城半導體指數", "^VIX": "VIX 恐慌指數",
+    "^N225": "日經 225 指數", "^HSI": "恒生指數", "^KS11": "韓國綜合指數", "000001.SS": "上證綜合指數",
+    # 加密貨幣
+    "BTC-USD": "比特幣", "ETH-USD": "以太幣", "SOL-USD": "索拉納", "XRP-USD": "瑞波幣", "DOGE-USD": "狗狗幣",
+    "BNB-USD": "幣安幣", "ADA-USD": "艾達幣", "USDT-USD": "泰達幣",
+    # 美股
+    "AAPL": "蘋果", "MSFT": "微軟", "NVDA": "輝達", "TSLA": "特斯拉", "AMZN": "亞馬遜", "GOOGL": "Alphabet（谷歌）A",
+    "GOOG": "Alphabet（谷歌）C", "META": "Meta（臉書）", "TSM": "台積電 ADR", "AMD": "超微", "INTC": "英特爾",
+    "AVGO": "博通", "QCOM": "高通", "MU": "美光", "ASML": "艾司摩爾", "ARM": "安謀", "SMCI": "美超微",
+    "NFLX": "網飛", "ORCL": "甲骨文", "IBM": "IBM（國際商業機器）", "CSCO": "思科", "ADBE": "奧多比",
+    "CRM": "賽富時", "PLTR": "帕蘭泰爾", "UBER": "優步", "SHOP": "Shopify", "KO": "可口可樂", "PEP": "百事",
+    "MCD": "麥當勞", "SBUX": "星巴克", "NKE": "耐吉", "DIS": "迪士尼", "WMT": "沃爾瑪", "COST": "好市多",
+    "JPM": "摩根大通", "BAC": "美國銀行", "GS": "高盛", "MS": "摩根士丹利", "V": "Visa（威士）", "MA": "萬事達卡",
+    "BRK-B": "波克夏 B", "JNJ": "嬌生", "PFE": "輝瑞", "LLY": "禮來", "MRNA": "莫德納", "UNH": "聯合健康",
+    "XOM": "埃克森美孚", "CVX": "雪佛龍", "BA": "波音", "GE": "奇異", "F": "福特汽車", "GM": "通用汽車",
+    "BABA": "阿里巴巴", "PDD": "拼多多", "JD": "京東", "NIO": "蔚來", "BIDU": "百度", "UMC": "聯電 ADR",
+    "ASX": "日月光 ADR", "TXN": "德州儀器", "AMAT": "應用材料", "LRCX": "科林研發", "KLAC": "科磊",
+    "SPY": "SPDR 標普 500 ETF", "QQQ": "景順那斯達克 100 ETF", "VOO": "Vanguard 標普 500 ETF",
+    "VTI": "Vanguard 整體股市 ETF", "SOXX": "iShares 半導體 ETF", "SMH": "VanEck 半導體 ETF",
+    "TLT": "iShares 20 年期以上美債 ETF", "GLD": "SPDR 黃金 ETF",
+    "SOFI": "SoFi 科技", "RKLB": "火箭實驗室", "CRWD": "CrowdStrike（網路安全）", "COIN": "Coinbase（加密貨幣交易所）",
+    "HOOD": "羅賓漢", "SNOW": "雪花", "PANW": "派拓網路", "NOW": "ServiceNow（雲端服務）", "ABNB": "愛彼迎",
+    "PYPL": "PayPal（貝寶）", "SPOT": "Spotify（聲田）", "ZM": "Zoom 視訊", "RIVN": "Rivian 電動車",
+    "LCID": "路西德", "MSTR": "微策略", "LULU": "露露樂檬", "T": "AT&T（美國電話電報）", "VZ": "威訊",
+    "TMUS": "T-Mobile 美國", "HD": "家得寶", "LOW": "勞氏", "TGT": "目標百貨", "PG": "寶僑", "ABBV": "艾伯維",
+    "MRK": "默克", "NVO": "諾和諾德", "AZN": "阿斯特捷利康", "TM": "豐田汽車 ADR", "SONY": "索尼",
+    "BRK-A": "波克夏 A", "CAT": "開拓重工", "DE": "迪爾", "LMT": "洛克希德馬丁", "RTX": "雷神技術",
+    "NOC": "諾斯洛普格拉曼", "MMM": "3M", "HON": "漢威聯合", "ANET": "Arista 網路", "MRVL": "邁威爾",
+    "ON": "安森美", "NXPI": "恩智浦", "ADI": "亞德諾", "CDNS": "益華電腦", "SNPS": "新思科技", "DELL": "戴爾",
+    "HPQ": "惠普", "HPE": "慧與", "WDC": "威騰電子", "STX": "希捷", "NET": "Cloudflare（雲端網路）",
+    "TSM.MX": "台積電", "BIIB": "百健", "GILD": "吉利德", "AMGN": "安進", "CMCSA": "康卡斯特", "CVS": "CVS 健康",
+    "SCHW": "嘉信理財", "C": "花旗集團", "WFC": "富國銀行", "AXP": "美國運通", "BLK": "貝萊德", "PM": "菲利普莫里斯",
+    "MO": "奧馳亞", "UPS": "優比速", "FDX": "聯邦快遞", "DAL": "達美航空", "UAL": "聯合航空", "AAL": "美國航空",
+}
+
+
+def _http_get(url: str, timeout: float = 8.0) -> str:
+    """以標準函式庫發出 GET 請求並回傳文字（不另外增加套件依賴）"""
+    import urllib.request
+    req = urllib.request.Request(url, headers=HTTP_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _has_cjk(s: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in s or "")
+
+
+def _to_traditional(s: str) -> str:
+    """簡體轉正體（台灣用字與慣用詞）；未安裝 opencc 時原樣回傳"""
+    try:
+        from opencc import OpenCC
+        return OpenCC("s2twp").convert(s)
+    except Exception:
+        return s
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_tw_names() -> dict:
+    """
+    向證交所與櫃買中心 OpenAPI 取得所有上市、上櫃股票與 ETF 的官方中文簡稱。
+    每日快取一次；任一來源失敗時只回傳成功的部分。
+    """
+    import json
+    names = {}
+    sources = [
+        ("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", "Code", "Name"),
+        ("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", "SecuritiesCompanyCode", "CompanyName"),
+    ]
+    for url, k_code, k_name in sources:
+        try:
+            for row in json.loads(_http_get(url, timeout=12)):
+                code, name = str(row.get(k_code, "")).strip(), str(row.get(k_name, "")).strip()
+                if code and name:
+                    names.setdefault(code, name)
+        except Exception:
+            continue
+    return names
+
+
+def _yahoo_tw_name(symbol: str) -> str:
+    """Yahoo 奇摩股市頁面標題，例如「台積電(2330.TW) 走勢圖 - Yahoo股市」→「台積電」"""
+    import re
+    import urllib.parse
+    try:
+        page = _http_get("https://tw.stock.yahoo.com/quote/" + urllib.parse.quote(symbol), timeout=8)
+        m = re.search(r"<title>\s*(.+?)\s*\(" + re.escape(symbol) + r"\)", page)
+        return html.unescape(m.group(1)).strip() if m else ""
+    except Exception:
+        return ""
+
+
+def _wikidata_name(ticker: str) -> str:
+    """依股票代號（Wikidata 屬性 P249）查詢公司的正體中文名稱"""
+    import json
+    import urllib.parse
+    query = (
+        'SELECT ?tw ?hant ?hk ?zh WHERE { ?item p:P414 ?st . ?st pq:P249 "%s" . '
+        "OPTIONAL{?item rdfs:label ?tw FILTER(lang(?tw)='zh-tw')} "
+        "OPTIONAL{?item rdfs:label ?hant FILTER(lang(?hant)='zh-hant')} "
+        "OPTIONAL{?item rdfs:label ?hk FILTER(lang(?hk)='zh-hk')} "
+        "OPTIONAL{?item rdfs:label ?zh FILTER(lang(?zh)='zh')} } LIMIT 5" % ticker.replace('"', "")
+    )
+    try:
+        url = "https://query.wikidata.org/sparql?format=json&query=" + urllib.parse.quote(query)
+        rows = json.loads(_http_get(url, timeout=5))["results"]["bindings"]
+    except Exception:
+        return ""
+    for key in ("tw", "hant", "hk", "zh"):
+        for row in rows:
+            val = row.get(key, {}).get("value", "")
+            if _has_cjk(val):
+                return val if key != "zh" else _to_traditional(val)
+    return ""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def chinese_name(symbol: str, english: str = "") -> tuple:
+    """
+    回傳 (中文名稱, 是否找到中文)。找不到任何中文時回傳英文名稱並標記 False。
+    """
+    base = symbol.replace(".TWO", "").replace(".TW", "")
+    if symbol.endswith((".TW", ".TWO")):
+        name = fetch_tw_names().get(base) or NAME_MAP.get(base) or _yahoo_tw_name(symbol)
+        return (name, True) if name else (english or base, False)
+    if symbol in CN_NAMES:
+        return CN_NAMES[symbol], True
+    name = _yahoo_tw_name(symbol)
+    if _has_cjk(name):
+        return name, True
+    ticker = symbol.split(".")[0].split("-")[0]
+    if not symbol.startswith("^") and not symbol.endswith("-USD"):
+        name = _wikidata_name(ticker)
+        if name:
+            return name, True
+    return (english or symbol), False
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_meta(symbol: str) -> dict:
     """
-    取得股票名稱、市場、幣別：
-      - 台股：名稱優先用內建中文對照表，市場由 .TW / .TWO 判斷
-      - 其他：嘗試向 Yahoo 查詢（失敗時退回代碼本身）
+    取得股票名稱（中文）、英文名稱、市場、幣別：
+      - 市場由代碼後綴判斷（.TW 上市、.TWO 上櫃、^ 指數、-USD 加密貨幣），其餘向 Yahoo 查詢
+      - 中文名稱見 chinese_name()
     """
     base = symbol.replace(".TWO", "").replace(".TW", "")
-    meta = {"name": NAME_MAP.get(base, base), "market": "", "currency": ""}
+    meta = {"name": base, "name_en": "", "has_cn": False, "market": "", "currency": ""}
     if symbol.endswith(".TWO"):
         meta.update(market="台灣上櫃（TPEx）", currency="TWD")
     elif symbol.endswith(".TW"):
@@ -467,12 +617,10 @@ def fetch_meta(symbol: str) -> dict:
         meta["market"] = "指數"
     elif symbol.endswith("-USD"):
         meta.update(market="加密貨幣", currency="USD")
-    need_info = (base not in NAME_MAP) or not symbol.endswith((".TW", ".TWO"))
-    if need_info:
+    if not symbol.endswith((".TW", ".TWO")):  # 海外標的：向 Yahoo 取得英文名稱、交易所與幣別
         try:
             info = yf.Ticker(symbol).info or {}
-            if base not in NAME_MAP:
-                meta["name"] = info.get("shortName") or info.get("longName") or base
+            meta["name_en"] = info.get("shortName") or info.get("longName") or ""
             if not meta["market"]:
                 meta["market"] = info.get("fullExchangeName") or info.get("exchange") or "海外市場"
             if not meta["currency"]:
@@ -480,6 +628,7 @@ def fetch_meta(symbol: str) -> dict:
         except Exception:
             if not meta["market"]:
                 meta["market"] = "海外市場"
+    meta["name"], meta["has_cn"] = chinese_name(symbol, meta["name_en"])
     return meta
 
 
@@ -1242,6 +1391,13 @@ def main() -> None:
         chg_cls = cls_of(last["Chg"])
         arrow = "▲" if last["Chg"] > 0 else ("▼" if last["Chg"] < 0 else "")
         ohlc_cls = lambda v: cls_of(v - prev_bar["Close"])
+        # 中文名稱為主標題；海外標的附上英文全名，查無中文時明確標示
+        if meta["has_cn"] and meta["name_en"] and meta["name_en"] != meta["name"]:
+            name_sub = f'<span class="qk-q-en">{esc(meta["name_en"])}</span>'
+        elif not meta["has_cn"]:
+            name_sub = '<span class="qk-q-en">（查無中文名稱，顯示英文）</span>'
+        else:
+            name_sub = ""
         tags = [f'<span class="qk-tag mono">{esc(symbol)}</span>']
         if meta["market"]:
             tags.append(f'<span class="qk-tag">{esc(meta["market"])}</span>')
@@ -1255,7 +1411,7 @@ def main() -> None:
         st.markdown(
             f'<div class="qk-card">'
             f'<div class="qk-quote">'
-            f'  <div><div class="qk-q-name">{esc(meta["name"])}</div>'
+            f'  <div><div class="qk-q-name">{esc(meta["name"])}{name_sub}</div>'
             f'       <div class="qk-q-tags">{"".join(tags)}</div>'
             f'       <div class="qk-q-meta">最新 K 棒：<span class="qk-mono">{data_time}</span>'
             f'（交易所當地時間）{color_note}</div></div>'
