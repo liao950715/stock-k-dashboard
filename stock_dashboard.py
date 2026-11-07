@@ -988,6 +988,36 @@ def build_chart(view: pd.DataFrame, t: dict, theme_key: str, selected_ma: list, 
     tick_idx = sorted(set(np.linspace(0, n_bars - 1, min(n_ticks, n_bars)).round().astype(int).tolist()))
     tick_vals = [x[i] for i in tick_idx]
     tick_text = [view.index[i].strftime(short_fmt) for i in tick_idx]
+
+    # ---- 6-10 縮放鎖定：初始畫面就是「最小縮放」，可放大、平移，但不能縮小到超出原本範圍 ----
+    def padded(lo, hi, top=0.06, bottom=0.04):
+        """依資料上下界加上留白，回傳座標範圍"""
+        lo, hi = float(lo), float(hi)
+        span = (hi - lo) or abs(hi) * 0.02 or 1.0
+        return [lo - span * bottom, hi + span * top]
+
+    price_cols = [view["Low"], view["High"]] + [view[f"MA{n}"] for n in selected_ma]
+    if show_bb:
+        price_cols += [view["BB_UP"], view["BB_LOW"]]
+    price_lo = min(float(s.min()) for s in price_cols if s.notna().any())
+    price_hi = max(float(s.max()) for s in price_cols if s.notna().any())
+    if show_cross and (golden.any() or death.any()):  # 交叉標記畫在 K 棒外側，也要納入範圍
+        pad = float((view["High"] - view["Low"]).mean()) * 0.9
+        price_lo, price_hi = price_lo - pad, price_hi + pad
+    x_range = [-0.8, n_bars - 0.2]
+    y_range = padded(price_lo, price_hi, top=0.08 if show_hl else 0.04, bottom=0.06 if show_hl else 0.04)
+    vol_all = pd.concat([view["Volume"], view["MV5"], view["MV20"]]).dropna() / vol_div
+    vol_max = float(vol_all.max()) if len(vol_all) else 0.0
+    vol_range = [0, (vol_max or 1) * 1.12]
+    if sub_ind in ("RSI", "KD"):
+        sub_range = [0, 100]
+    elif sub_ind == "MACD":
+        macd_vals = pd.concat([view["OSC"], view["DIF"], view["MACD"]]).dropna()
+        sub_range = padded(macd_vals.min(), macd_vals.max(), 0.08, 0.08) if len(macd_vals) else [-1, 1]
+    else:
+        sub_range = [0, 1]
+    lock = lambda r: dict(range=r, minallowed=r[0], maxallowed=r[1], autorange=False)
+
     layout = dict(
         height=height,
         margin=dict(l=6, r=6, t=26, b=6),
@@ -1009,16 +1039,15 @@ def build_chart(view: pd.DataFrame, t: dict, theme_key: str, selected_ma: list, 
             rangeslider=dict(visible=False), tickangle=0,
             # 手機：固定少量刻度＋短日期；桌面：自動刻度（縮放時會自動補上更細的日期）
             **(dict(tickmode="array", tickvals=tick_vals, ticktext=tick_text) if mobile else dict(nticks=n_ticks)),
-            categoryorder="array", categoryarray=x, range=[-0.8, n_bars - 0.2],
+            categoryorder="array", categoryarray=x, **lock(x_range),
         ),
-        yaxis=dict(**axis_common, domain=dom_main, side="right", tickformat=",.2f"),
-        yaxis2=dict(**axis_common, domain=dom_vol, side="right", tickformat="~s", rangemode="tozero"),
+        yaxis=dict(**axis_common, domain=dom_main, side="right", tickformat=",.2f", **lock(y_range)),
+        yaxis2=dict(**axis_common, domain=dom_vol, side="right", tickformat="~s", **lock(vol_range)),
         annotations=annotations,
         shapes=shapes,
     )
     if has_sub:
-        layout["yaxis3"] = dict(**axis_common, domain=dom_sub, side="right",
-                                range=[0, 100] if sub_ind in ("RSI", "KD") else None)
+        layout["yaxis3"] = dict(**axis_common, domain=dom_sub, side="right", **lock(sub_range))
     fig.update_layout(**layout)
     return fig
 
