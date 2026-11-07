@@ -147,19 +147,27 @@ def inject_css(t: dict) -> None:
     /* ===== 週期選擇：把 radio 變成分段按鈕（類似 Yahoo 股市） ===== */
     div[role="radiogroup"] { gap: 0 !important; background: __PANEL__; border: 1px solid __BORDER__;
         border-radius: 12px; padding: 4px; display: inline-flex; flex-wrap: wrap; }
-    div[role="radiogroup"] > label { margin: 0 !important; padding: 6px 18px; border-radius: 9px;
+    div[role="radiogroup"] > div { display: flex; flex-wrap: wrap; gap: 0 !important; }  /* 新版多一層包裝 */
+    div[role="radiogroup"] label { margin: 0 !important; padding: 6px 18px; border-radius: 9px;
         cursor: pointer; transition: all .15s ease; }
-    div[role="radiogroup"] > label > div:first-child { display: none; }
-    div[role="radiogroup"] > label p { font-weight: 700; color: __MUTED__ !important; font-size: 0.95rem; }
-    div[role="radiogroup"] > label:hover { background: __PANEL2__; }
-    div[role="radiogroup"] > label:has(input:checked) { background: linear-gradient(135deg, __ACCENT__, __ACCENT2__); }
-    div[role="radiogroup"] > label:has(input:checked) p { color: #FFFFFF !important; }
+    div[role="radiogroup"] label > div:first-child { display: none; }
+    /* 新版 Streamlit（>= 1.4x）：圓點包在 label > div > div:first-child 裡 */
+    div[role="radiogroup"] label > div > div:first-child:not([data-testid="stMarkdownContainer"]) { display: none; }
+    div[role="radiogroup"] label p { font-weight: 700; color: __MUTED__ !important; font-size: 0.95rem; }
+    div[role="radiogroup"] label:hover { background: __PANEL2__; }
+    div[role="radiogroup"] label:has(input:checked) { background: linear-gradient(135deg, __ACCENT__, __ACCENT2__); }
+    div[role="radiogroup"] label:has(input:checked) p { color: #FFFFFF !important; }
 
     /* ===== st.metric 卡片化 ===== */
     [data-testid="stMetric"] { background: __PANEL__; border: 1px solid __BORDER__; border-radius: 14px;
         padding: 14px 16px 10px 16px; box-shadow: 0 4px 18px rgba(0,0,0,0.12); }
     [data-testid="stMetricLabel"] p { color: __MUTED__ !important; font-size: 0.82rem; letter-spacing: .5px; }
-    [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; color: __TEXT__; font-size: 1.55rem; font-weight: 700; }
+    [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; color: __TEXT__;
+        font-size: clamp(1.05rem, 1.55vw, 1.55rem); font-weight: 700; }
+    /* 新版 Streamlit 會把過長數字截成「…」，這裡改為完整顯示 */
+    [data-testid="stMetricValue"] p, [data-testid="stMetricValue"] div {
+        font-size: inherit !important; font-family: inherit !important; font-weight: inherit !important;
+        overflow: visible !important; text-overflow: clip !important; white-space: nowrap; }
     [data-testid="stMetricDelta"] { font-family: 'JetBrains Mono', monospace; font-size: .8rem; }
     [data-testid="stMetricDelta"] div { white-space: normal !important; overflow: visible !important; }
 
