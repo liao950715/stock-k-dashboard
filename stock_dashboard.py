@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 # =====================================================================
-# 理財機器人 期中報告：股票歷史 K 線圖與技術指標網頁
+# 理財機器人 期中報告：股票分析網頁
 # ---------------------------------------------------------------------
-# 資料來源：Yahoo Finance（使用 yfinance 套件抓取公開的歷史股價）
+# 資料來源：Yahoo Finance（yfinance）、證交所 / 櫃買中心 OpenAPI、Google 新聞 RSS
 # 網頁框架：Streamlit          圖表套件：Plotly
 #
 # 功能：
-#   1. 週期（Interval）：日線、週線、月線
-#   2. 資料跨度（Period）：1 天、5 天、10 天、20 天（自動改用分 K）、1 個月 ～ 5 年
-#   3. 均線：MA5、MA10、MA20、MA60（季線）、MA120（半年線）、MA240（年線）
-#   4. 副圖指標（下拉切換）：成交量、MACD、KDJ；主圖可加布林通道
-#   5. 相關新聞：Google 新聞 RSS + 證交所 / 櫃買中心每日重大訊息
-#   6. 護眼模式（深色）開關（側邊欄的 ◐ 圖示）
-#   7. 台股慣例：紅漲綠跌
+#   1. 頂部導覽列：股票搜尋、深色 / 淺色主題切換
+#   2. 資料跨度：1 天、5 天、10 天、20 天、1 個月 ～ 5 年
+#   3. K 棒週期：5 分、15 分、60 分、日線、週線、月線（切換跨度時自動帶入合適週期，仍可手動改）
+#   4. 均線：MA5、MA10、MA20、MA60（季線）、MA120（半年線）、MA240（年線）；布林通道
+#   5. 副圖：成交量、MACD、KDJ
+#   6. 相關新聞：Google 新聞 RSS + 證交所 / 櫃買中心每日重大訊息，關鍵字判斷偏多 / 偏空
+#   7. 台股慣例：紅漲綠跌（同時用 ▲▼ 與正負號，不只靠顏色）
 #
 # 執行方式：streamlit run stock_dashboard.py
 # =====================================================================
@@ -29,106 +29,232 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="股票 K 線與技術指標", page_icon="📈", layout="wide")
+st.set_page_config(page_title="股票分析", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
-# 一點點 CSS：筆電寬度時 st.metric 的數字會被截成「2,13…」，
-# 這裡讓字級跟著螢幕寬度縮放，並且不要截斷
-st.markdown(
-    """
-    <style>
-    [data-testid="stMetricValue"] { font-size: clamp(1.1rem, 1.9vw, 2rem); }
-    [data-testid="stMetricValue"] * { overflow: visible !important; text-overflow: clip !important; white-space: nowrap; }
-    [data-testid="stMetricDelta"] * { overflow: visible !important; text-overflow: clip !important; white-space: normal !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# 護眼模式（深色）用的 CSS：Streamlit 沒辦法在程式執行中切換主題，
-# 所以改成打開開關時，把背景、文字、輸入框等元件的顏色用 CSS 蓋過去
-DARK_CSS = """
-<style>
-.stApp, [data-testid="stHeader"] { background-color: #0E1117 !important; }
-.stApp, .stApp p, .stApp span, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp li,
-[data-testid="stMarkdownContainer"], [data-testid="stMetricValue"] { color: #E6E6E6 !important; }
-[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] *, [data-testid="stMetricLabel"] * { color: #A3A8B8 !important; }
-[data-testid="stSidebar"] { background-color: #1A1D24 !important; }
-/* 文字輸入框、下拉選單（新舊版 Streamlit 的結構不同，兩種都寫） */
-.stApp input, [data-testid="stTextInputRootElement"], div[data-baseweb="input"], div[data-baseweb="input"] > div,
-div[data-baseweb="select"] > div, div[data-baseweb="select"] div,
-[data-testid="stSelectbox"] [role="group"], [data-testid="stSelectbox"] [role="group"] > *:not(svg) {
-    background-color: #262A33 !important; color: #E6E6E6 !important; border-color: #3A3F4B !important; }
-div[data-baseweb="popover"] ul, div[data-baseweb="popover"] li, [role="listbox"], [role="listbox"] [role="option"] {
-    background-color: #262A33 !important; color: #E6E6E6 !important; }
-[data-testid="stExpander"], .stDownloadButton button { background-color: #1A1D24 !important; border-color: #3A3F4B !important; }
-.stDownloadButton button p { color: #E6E6E6 !important; }
-button[role="tab"] p { color: #A3A8B8 !important; }
-button[role="tab"][aria-selected="true"] p { color: #FF6B6B !important; }
-/* 漲跌幅小標籤：保留 Streamlit 原本的紅 / 綠，只把底色拿掉、顏色調亮，深色背景上才看得清楚 */
-[data-testid="stMetricDelta"] { background-color: rgba(255,255,255,0.06) !important; filter: brightness(1.7); }
-[data-testid="stMetricDelta"] * { color: inherit !important; }
-/* 沒勾選的核取方塊、單選圓點原本是白底，改成深灰（新舊版 Streamlit 的結構不同，兩種都寫） */
-[data-testid="stCheckbox"]:not(:has(input:checked)) label div:not([data-testid]),
-[role="radiogroup"] label:not(:has(input:checked)) div:not([data-testid]),
-label[data-baseweb="checkbox"]:not(:has(input:checked)) > span,
-label[data-baseweb="radio"]:not(:has(input:checked)) > div:first-child {
-    background-color: #262A33 !important; border-color: #6B7280 !important; }
-</style>
-"""
+# Streamlit 版本：有些參數（例如 vertical_alignment、Material 圖示）是新版才有，舊版要退回別的寫法
+ST_VERSION = tuple(int(x) for x in st.__version__.split(".")[:2])
 
 # ---------------------------------------------------------------------
-# 一、常數設定
+# 一、配色與常數
 # ---------------------------------------------------------------------
+# 深色主題：主背景比圖表背景再暗一點，畫面才有層次，不會整頁同一種黑
+# 淺色主題：另外定義一組可讀性好的顏色，不直接沿用深色的文字顏色
+THEMES = {
+    "dark": dict(
+        bg="#0B0E14", chart="#141A23", toolbar="#171D27", border="#293241",
+        text="#F1F4F8", muted="#8994A6", up="#DF737B", down="#45B18A", accent="#91B4E8",
+        grid="rgba(137,148,166,0.12)", hover="#1C2330",
+    ),
+    "light": dict(
+        bg="#F7F8FA", chart="#FFFFFF", toolbar="#EEF1F5", border="#DDE2E9",
+        text="#161B26", muted="#5F6B7C", up="#D0434F", down="#16875F", accent="#2F64C8",
+        grid="rgba(95,107,124,0.12)", hover="#E7ECF3",
+    ),
+}
 
-# 台股習慣「紅漲綠跌」，剛好跟美股相反，所以顏色要自己指定
-UP_COLOR = "#E0283B"     # 上漲：紅色
-DOWN_COLOR = "#0F9D58"   # 下跌：綠色
-
-# 每條均線的顏色（盡量挑對比清楚、不刺眼的顏色）
+# 每條均線的顏色（不刺眼、深淺兩種背景都看得清楚）
 MA_COLORS = {
-    5: "#E6A817",    # MA5   黃
-    10: "#E07B24",   # MA10  橙
-    20: "#2F80ED",   # MA20  藍
-    60: "#14A37F",   # MA60  綠（季線）
-    120: "#8B5CF6",  # MA120 紫（半年線）
-    240: "#6B7280",  # MA240 灰（年線）
+    5: "#E2B04A",    # MA5   黃
+    10: "#E08A4F",   # MA10  橙
+    20: "#6FA0E6",   # MA20  藍
+    60: "#3FB5A0",   # MA60  青綠（季線）
+    120: "#A08BE0",  # MA120 紫（半年線）
+    240: "#8A94A6",  # MA240 灰（年線）
 }
 MA_NAMES = {5: "MA5", 10: "MA10", 20: "MA20", 60: "MA60 季線", 120: "MA120 半年線", 240: "MA240 年線"}
 
-# 週期選項：
-#   yf_interval：丟給 yfinance 的參數
+# K 棒週期：
+#   yf         ：丟給 yfinance 的參數
+#   intraday   ：是不是分 K
+#   max_days   ：Yahoo 對分 K 的限制（5 / 15 分 K 只有最近 60 天，60 分 K 約 730 天）
+#   warmup_days：分 K 多抓幾天當暖機資料（讓 MA、MACD 從畫面最左邊就有值）
 #   resample   ：週線、月線不直接跟 Yahoo 要，而是自己用日線 resample（原因寫在 resample_ohlcv 裡）
 INTERVALS = {
-    "日線": {"yf_interval": "1d", "resample": None},
-    "週線": {"yf_interval": "1d", "resample": "W"},
-    "月線": {"yf_interval": "1d", "resample": "M"},
+    "5 分":  {"yf": "5m",  "intraday": True,  "max_days": 59,  "warmup_days": 10, "resample": None},
+    "15 分": {"yf": "15m", "intraday": True,  "max_days": 59,  "warmup_days": 20, "resample": None},
+    "60 分": {"yf": "60m", "intraday": True,  "max_days": 729, "warmup_days": 80, "resample": None},
+    "日線":  {"yf": "1d",  "intraday": False, "resample": None},
+    "週線":  {"yf": "1d",  "intraday": False, "resample": "W"},
+    "月線":  {"yf": "1d",  "intraday": False, "resample": "M"},
 }
 
-# 短跨度（以「交易日」為單位）：如果還用日 K，1 天只有 1 根、5 天只有 5 根，看不出走勢，
-# 所以跟 Yahoo 的「1 日 / 5 日走勢」一樣，自動改用分 K：
-#   (交易日數, 丟給 yfinance 的分 K 間隔, 顯示名稱, 抓幾天資料)
-#   「抓幾天」比顯示的天數多很多，一來是暖機資料（例如 5 分 K 的 MA240 要前面 240 根 = 約 4 個交易日），
-#   二來是遇到週末、連假時，往前才找得到足夠的交易日。
-#   Yahoo 的限制：5 分 K、15 分 K 只能抓最近 60 天，60 分 K 可以抓 730 天，所以天數都在限制內。
-SHORT_PERIODS = {
-    "1 天":  (1,  "5m",  "5 分 K",  "30d"),
-    "5 天":  (5,  "15m", "15 分 K", "59d"),
-    "10 天": (10, "60m", "60 分 K", "180d"),
-    "20 天": (20, "60m", "60 分 K", "180d"),
+# 資料跨度：("d", N) = 最近 N 個交易日；("m", N) = 最近 N 個月
+SPANS = {
+    "1 天": ("d", 1), "5 天": ("d", 5), "10 天": ("d", 10), "20 天": ("d", 20),
+    "1 個月": ("m", 1), "3 個月": ("m", 3), "6 個月": ("m", 6), "1 年": ("m", 12),
+    "2 年": ("m", 24), "3 年": ("m", 36), "5 年": ("m", 60),
 }
+# 切換跨度時自動帶入的 K 棒週期（像 Yahoo 的 1 日 / 5 日走勢會用分 K）；使用者之後仍可自己改
+DEFAULT_INTERVAL = {"1 天": "5 分", "5 天": "15 分", "10 天": "60 分", "20 天": "60 分"}
 
-# 一般跨度（以「月」為單位，之後用 pd.DateOffset 往回推起始日期）
-PERIODS = {"1 個月": 1, "3 個月": 3, "6 個月": 6, "1 年": 12, "2 年": 24, "3 年": 36, "5 年": 60}
-PERIOD_OPTIONS = list(SHORT_PERIODS) + list(PERIODS)   # 下拉選單：短的在前、長的在後
-
-# 週線、月線如果跨度太短，K 棒會少到看不出東西（例如月線只看 1 個月 = 1 根），
-# 所以設一個合理的最短跨度
+# 週線、月線如果跨度太短，K 棒會少到看不出東西，所以設最短跨度（月）
 MIN_MONTHS = {"週線": 3, "月線": 12}
 
-# 長天期均線需要「暖機資料」：例如日線 MA240 需要前面 240 個交易日的收盤價，
-# 如果只抓使用者要看的 1 年，畫面最左邊的 MA240 會是空的。
-# 所以實際抓資料時，會比顯示範圍再往前多抓一段（單位：天）
+# 日 / 週 / 月線的暖機資料（天）：例如日線 MA240 需要前面 240 個交易日
 WARMUP_DAYS = {"日線": 400, "週線": 240 * 7 + 30, "月線": 240 * 31 + 60}
+
+
+def build_css(t):
+    """
+    依照主題顏色產生整個網頁的 CSS。
+    Streamlit 沒辦法在執行中切換主題，所以用 CSS 把背景、文字、輸入框、分頁等顏色蓋過去。
+    有些元件新舊版 Streamlit 的 HTML 結構不同，所以會看到兩種寫法並列。
+    """
+    search_icon = (
+        "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' "
+        "fill='none' stroke='%23" + t["muted"].lstrip("#") + "' stroke-width='2' stroke-linecap='round'>"
+        "<circle cx='11' cy='11' r='7'/><line x1='16.5' y1='16.5' x2='21' y2='21'/></svg>"
+    )
+    css = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;600&display=swap');
+
+/* ---------- 全站：字體、背景、內容寬度 ---------- */
+html, body, .stApp { font-family: 'Inter', 'Noto Sans TC', -apple-system, 'Segoe UI', 'Microsoft JhengHei', sans-serif; }
+.stApp, [data-testid="stHeader"] { background: __bg__ !important; }
+.stApp, .stApp p, .stApp label, .stApp li, [data-testid="stMarkdownContainer"] { color: __text__; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: __muted__ !important; }
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] { display: none !important; }
+/* 上方留 56px 給 Streamlit 自己的工具列（Deploy / 選單），導覽列才不會被蓋住 */
+.block-container, [data-testid="stMainBlockContainer"] { max-width: 1440px; padding: 56px 48px 48px 48px !important; }
+@media (max-width: 1100px) { .block-container, [data-testid="stMainBlockContainer"] { padding: 56px 20px 40px 20px !important; } }
+[data-testid="stVerticalBlock"] { gap: 0.75rem; }
+/* 只用來給 CSS 辨識區塊的「記號」元素，本身不佔版面 */
+[data-testid="stElementContainer"]:has(.qk-mark), .element-container:has(.qk-mark) { display: none !important; }
+.qk-num { font-variant-numeric: tabular-nums; }
+
+/* ---------- 輸入框、下拉選單、按鈕：統一高度 38px、圓角 8px ---------- */
+.stApp input { color: __text__ !important; }
+[data-testid="stTextInputRootElement"], div[data-baseweb="input"], div[data-baseweb="base-input"],
+div[data-baseweb="select"] > div, [data-testid="stSelectbox"] [role="group"] {
+    background: __toolbar__ !important; border: 1px solid __border__ !important; border-radius: 8px !important;
+    min-height: 38px !important; color: __text__ !important; box-shadow: none !important; }
+div[data-baseweb="input"] > div, div[data-baseweb="base-input"] > input, div[data-baseweb="select"] div,
+[data-testid="stSelectbox"] [role="group"] > *:not(svg) { background: transparent !important; color: __text__ !important; }
+[data-testid="stTextInputRootElement"]:focus-within, div[data-baseweb="input"]:focus-within,
+[data-testid="stSelectbox"] [role="group"]:focus-within { border-color: __accent__ !important; }
+div[data-baseweb="popover"] ul, div[data-baseweb="popover"] li, [role="listbox"], [role="listbox"] [role="option"] {
+    background: __toolbar__ !important; color: __text__ !important; }
+[role="listbox"] [role="option"]:hover, div[data-baseweb="popover"] li:hover { background: __hover__ !important; }
+[data-testid="stPopoverBody"], div[data-baseweb="popover"] > div { background: __toolbar__ !important; border-color: __border__ !important; }
+.stButton button, [data-testid="stPopover"] button, .stDownloadButton button {
+    min-height: 38px; border-radius: 8px; background: __toolbar__; color: __text__; border: 1px solid __border__; box-shadow: none; }
+.stButton button:hover, [data-testid="stPopover"] button:hover, .stDownloadButton button:hover {
+    border-color: __accent__; color: __accent__; background: __hover__; }
+.stButton button p, [data-testid="stPopover"] button p, .stDownloadButton button p { color: inherit !important; font-size: 13px; }
+/* 沒勾選的核取方塊 / 單選圓點：底色跟著主題 */
+[data-testid="stCheckbox"]:not(:has(input:checked)) label div:not([data-testid]),
+label[data-baseweb="checkbox"]:not(:has(input:checked)) > span { background: __toolbar__ !important; border-color: __muted__ !important; }
+
+/* ---------- 頂部導覽列 ---------- */
+div[data-testid="stHorizontalBlock"]:has(.qk-nav) { align-items: center; padding: 6px 0 10px 0;
+    border-bottom: 1px solid __border__; margin-bottom: 8px; }
+.qk-brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 600; color: __text__; height: 40px; }
+.qk-brand svg { stroke: __accent__; }
+div[data-testid="stHorizontalBlock"]:has(.qk-nav) input {
+    padding-left: 36px !important; background: url("__search_icon__") no-repeat 12px center !important; font-size: 14px; }
+div[data-testid="stHorizontalBlock"]:has(.qk-nav) [data-testid="stCheckbox"],
+div[data-testid="stHorizontalBlock"]:has(.qk-nav) .stCheckbox { display: flex; justify-content: flex-end; }
+div[data-testid="stHorizontalBlock"]:has(.qk-nav) [data-testid="stWidgetLabel"] *,
+div[data-testid="stHorizontalBlock"]:has(.qk-nav) label p { color: __muted__ !important; font-size: 18px; }
+
+/* ---------- 股票名稱與價格 ---------- */
+.qk-head { margin: 16px 0 0 0; }
+.qk-name { font-size: 26px; font-weight: 600; color: __text__; line-height: 1.3; }
+.qk-code { font-size: 14px; font-weight: 400; color: __muted__; margin-left: 10px; }
+.qk-price-row { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
+.qk-price { font-size: 42px; font-weight: 600; color: __text__; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.qk-chg { font-size: 17px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.qk-up { color: __up__ !important; }
+.qk-down { color: __down__ !important; }
+.qk-flat { color: __muted__ !important; }
+.qk-meta { font-size: 13px; color: __muted__; margin-top: 6px; }
+.qk-stats { display: flex; flex-wrap: wrap; gap: 8px 40px; margin-top: 20px; }
+.qk-stat label { display: block; font-size: 12px; color: __muted__; margin-bottom: 2px; }
+.qk-stat b { font-size: 17px; font-weight: 500; color: __text__; font-variant-numeric: tabular-nums; }
+
+/* ---------- 頁面分頁（用 radio 做成文字分頁，底線標示目前頁面） ---------- */
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) { border-bottom: 1px solid __border__; margin-top: 20px; }
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] { gap: 28px !important; flex-wrap: nowrap; }
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] > div { display: flex; gap: 28px !important; }
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label {
+    margin: 0 !important; padding: 8px 0 10px 0; border-bottom: 2px solid transparent; cursor: pointer; }
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label p { font-size: 14px; color: __muted__ !important; }
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label:has(input:checked) { border-bottom-color: __accent__; }
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label:has(input:checked) p { color: __text__ !important; font-weight: 500; }
+
+/* ---------- 圖表工具列：資料跨度做成一排小按鈕 ---------- */
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) { align-items: center; margin-top: 8px; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] {
+    background: __toolbar__; border: 1px solid __border__; border-radius: 8px; padding: 3px; gap: 0 !important;
+    display: inline-flex; flex-wrap: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] > div { display: flex; flex-wrap: nowrap; gap: 0 !important; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label {
+    margin: 0 !important; padding: 0 11px; min-height: 30px; border-radius: 6px; display: flex; align-items: center; cursor: pointer; flex: 0 0 auto; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label p { font-size: 13px; color: __muted__ !important; white-space: nowrap; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label:hover { background: __hover__; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label:has(input:checked) { background: __hover__; }
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label:has(input:checked) p { color: __text__ !important; font-weight: 500; }
+/* 兩種 radio 都把圓點藏起來（舊版：label 的第一個 div；新版：label > div > 第一個 div） */
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label > div:first-child:not(:has([data-testid="stMarkdownContainer"])),
+div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) [role="radiogroup"] label > div > div:first-child:not([data-testid="stMarkdownContainer"]),
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label > div:first-child:not(:has([data-testid="stMarkdownContainer"])),
+div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label > div > div:first-child:not([data-testid="stMarkdownContainer"]) {
+    display: none !important; }
+
+/* 較窄的螢幕：資料跨度自己一排，三個選單排在下一排平分寬度，才不會被擠到看不到字 */
+@media (max-width: 1100px) {
+  div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) { flex-wrap: wrap !important; row-gap: 8px; }
+  div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) > div:first-child { flex: 1 1 100% !important; min-width: 100% !important; }
+  div[data-testid="stHorizontalBlock"]:has(.qk-toolbar) > div:not(:first-child) { flex: 1 1 0 !important; min-width: 0 !important; }
+}
+
+/* ---------- 圖表：比主背景亮一點的底色、圓角、無外框無陰影 ---------- */
+[data-testid="stPlotlyChart"] { background: __chart__; border-radius: 10px; overflow: hidden; padding: 4px 2px 0 2px; }
+
+/* ---------- 新聞 ---------- */
+.qk-section { display: flex; justify-content: space-between; align-items: baseline; margin-top: 28px; }
+.qk-section-title { font-size: 16px; font-weight: 600; color: __text__; }
+.qk-section-title span { font-size: 13px; font-weight: 400; color: __muted__; margin-left: 8px; }
+.qk-news { max-width: 1080px; }
+.qk-item { display: flex; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid __border__; }
+.qk-item a, .qk-item-title { font-size: 15px; font-weight: 500; color: __text__ !important; text-decoration: none; line-height: 1.5; }
+.qk-item a:hover { color: __accent__ !important; }
+.qk-item-meta { font-size: 12px; color: __muted__; margin-top: 4px; }
+.qk-tag { flex: 0 0 auto; font-size: 12px; padding: 1px 8px; border-radius: 4px; border: 1px solid; height: fit-content; white-space: nowrap; }
+.qk-tag.qk-up { border-color: __up__; } .qk-tag.qk-down { border-color: __down__; } .qk-tag.qk-flat { border-color: __border__; }
+details.qk-detail { border-bottom: 1px solid __border__; }
+details.qk-detail summary { list-style: none; cursor: pointer; }
+details.qk-detail summary::-webkit-details-marker { display: none; }
+details.qk-detail summary .qk-item { border-bottom: none; }
+details.qk-detail summary:hover .qk-item-title { color: __accent__ !important; }
+.qk-detail-body { padding: 0 0 18px 0; font-size: 13px; color: __muted__; line-height: 1.8; }
+.qk-detail-body a { color: __accent__ !important; }
+.qk-overview { display: flex; flex-wrap: wrap; gap: 12px 48px; align-items: flex-end; padding: 8px 0 4px 0; }
+.qk-score { font-size: 42px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.qk-ov label { display: block; font-size: 12px; color: __muted__; margin-bottom: 4px; }
+.qk-ov b { font-size: 17px; font-weight: 500; color: __text__; }
+.qk-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 20px; background: __border__; }
+.qk-bar-legend { display: flex; gap: 24px; font-size: 12px; color: __muted__; margin-top: 8px; flex-wrap: wrap; }
+.qk-empty { background: __chart__; border-radius: 10px; padding: 36px 24px; text-align: center; color: __muted__; font-size: 13px; line-height: 1.8; }
+.qk-panel { border-top: 1px solid __border__; padding-top: 16px; }
+.qk-panel-head { display: flex; justify-content: space-between; align-items: baseline; }
+.qk-note { font-size: 12px; color: __muted__; }
+
+/* ---------- Expander、資料表、提示框 ---------- */
+[data-testid="stExpander"] { background: transparent !important; border: 1px solid __border__ !important; border-radius: 8px; }
+[data-testid="stExpander"] summary p, [data-testid="stExpander"] summary span { color: __text__ !important; }
+[data-testid="stAlert"] { border-radius: 8px; }
+/* 「查看全部」這種文字按鈕：不要外框和底色，只用藍色文字 */
+.stButton button[kind="tertiary"], .stButton button[data-testid="stBaseButton-tertiary"] {
+    background: transparent !important; border: none !important; color: __accent__ !important; min-height: 30px; padding: 0; }
+.stButton button[kind="tertiary"] p { color: __accent__ !important; }
+div[data-testid="stHorizontalBlock"]:has(.qk-section) .stButton { display: flex; justify-content: flex-end; }
+</style>
+"""
+    for key, value in t.items():
+        css = css.replace(f"__{key}__", value)
+    return css.replace("__search_icon__", search_icon)
 
 
 # ---------------------------------------------------------------------
@@ -462,163 +588,235 @@ def add_bollinger(df, n=20, k=2):
 # ---------------------------------------------------------------------
 # 五、畫圖
 # ---------------------------------------------------------------------
-def draw_chart(df, show_ma, sub_chart, x_format, vol_unit, dark=False, show_bb=False):
+def draw_chart(df, show_ma, show_bb, show_vol, sub_ind, x_format, vol_unit, t):
     """
-    上方主圖：K 線 + 均線（+ 布林通道）
-    下方副圖：成交量 / MACD / KDJ 三選一
-    兩張圖用 make_subplots(shared_xaxes=True) 共用 x 軸，縮放時會一起動。
+    主圖：K 線 + 均線（+ 布林通道），約 490px 高
+    副圖：成交量（約 130px，可關掉）、MACD / KDJ（約 150px，可不顯示）
+    全部用 make_subplots(shared_xaxes=True) 共用同一條時間軸，縮放、平移時會一起動。
+    t 是目前主題的顏色（深色 / 淺色），漲跌顏色也跟著主題，但一樣是紅漲綠跌。
     """
-    # x 軸用文字（類別軸），這樣週末、假日不會在圖上留下空白
+    up, down = t["up"], t["down"]
+    # x 軸用文字（類別軸），這樣週末、假日、收盤後的時間不會在圖上留下空白
     x = df.index.strftime(x_format)
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.72, 0.28])
+    # 依照要顯示的副圖決定有幾列、每列多高（像素）
+    rows = [("price", 490)]
+    if show_vol:
+        rows.append(("vol", 130))
+    if sub_ind != "無":
+        rows.append(("ind", 150))
+    heights = [h for _, h in rows]
+    row_of = {name: i + 1 for i, (name, _) in enumerate(rows)}
+
+    fig = make_subplots(rows=len(rows), cols=1, shared_xaxes=True, vertical_spacing=0.025,
+                        row_heights=[h / sum(heights) for h in heights])
 
     # --- K 線：收盤 >= 開盤用紅色（漲），收盤 < 開盤用綠色（跌） ---
     fig.add_trace(go.Candlestick(
         x=x, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-        increasing_line_color=UP_COLOR, increasing_fillcolor=UP_COLOR,
-        decreasing_line_color=DOWN_COLOR, decreasing_fillcolor=DOWN_COLOR,
+        increasing_line_color=up, increasing_fillcolor=up,
+        decreasing_line_color=down, decreasing_fillcolor=down,
         name="K線",
     ), row=1, col=1)
 
-    # --- 布林通道：上下軌用虛線，中間填一層很淡的顏色，看起來才不會太搶眼 ---
+    # --- 布林通道：上下軌虛線，中間填很淡的顏色 ---
     if show_bb:
-        fig.add_trace(go.Scatter(
-            x=x, y=df["BB_UP"], mode="lines", name="布林上軌",
-            line=dict(color="#9CA3AF", width=1, dash="dot"),
-        ), row=1, col=1)
-        fig.add_trace(go.Scatter(
-            x=x, y=df["BB_LOW"], mode="lines", name="布林下軌",
-            line=dict(color="#9CA3AF", width=1, dash="dot"),
-            fill="tonexty", fillcolor="rgba(156,163,175,0.10)",   # tonexty = 填滿到上一條線（上軌）
-        ), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=df["BB_UP"], mode="lines", name="布林上軌",
+                                 line=dict(color=t["muted"], width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=df["BB_LOW"], mode="lines", name="布林下軌",
+                                 line=dict(color=t["muted"], width=1, dash="dot"),
+                                 fill="tonexty", fillcolor="rgba(137,148,166,0.08)"), row=1, col=1)
 
     # --- 均線：只畫有勾選、而且有算出數值的 ---
     for n, checked in show_ma.items():
         if checked and df[f"MA{n}"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=x, y=df[f"MA{n}"], mode="lines", name=f"MA{n}",
-                line=dict(color=MA_COLORS[n], width=1.4),
-            ), row=1, col=1)
+            fig.add_trace(go.Scatter(x=x, y=df[f"MA{n}"], mode="lines", name=f"MA{n}",
+                                     line=dict(color=MA_COLORS[n], width=1.4)), row=1, col=1)
 
-    # --- 副圖 ---
-    if sub_chart == "成交量":
-        # 成交量顏色跟 K 棒同一套規則：當根收盤 >= 開盤 → 紅，否則 → 綠
-        colors = [UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["Open"], df["Close"])]
-        fig.add_trace(go.Bar(x=x, y=df["Volume"], marker_color=colors, name=f"成交量({vol_unit})"), row=2, col=1)
-        fig.update_yaxes(title_text=f"成交量({vol_unit})", row=2, col=1)
+    # --- 成交量：跟 K 棒同一套顏色規則 ---
+    if show_vol:
+        colors = [up if c >= o else down for o, c in zip(df["Open"], df["Close"])]
+        fig.add_trace(go.Bar(x=x, y=df["Volume"], marker_color=colors, marker_line_width=0,
+                             name=f"成交量({vol_unit})", opacity=0.8), row=row_of["vol"], col=1)
+        fig.update_yaxes(title_text=f"量({vol_unit})", row=row_of["vol"], col=1)
 
-    elif sub_chart == "MACD":
-        # 柱狀圖 OSC：正值紅色、負值綠色
-        osc_colors = [UP_COLOR if v >= 0 else DOWN_COLOR for v in df["OSC"].fillna(0)]
-        fig.add_trace(go.Bar(x=x, y=df["OSC"], marker_color=osc_colors, name="OSC 柱狀圖"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=x, y=df["DIF"], mode="lines", name="DIF 快線",
-                                 line=dict(color="#E6A817", width=1.3)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=x, y=df["DEA"], mode="lines", name="DEA 慢線",
-                                 line=dict(color="#2F80ED", width=1.3)), row=2, col=1)
-        fig.update_yaxes(title_text="MACD", row=2, col=1)
-
-    elif sub_chart == "KDJ":
-        fig.add_trace(go.Scatter(x=x, y=df["K"], mode="lines", name="K",
-                                 line=dict(color="#E6A817", width=1.3)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=x, y=df["D"], mode="lines", name="D",
-                                 line=dict(color="#2F80ED", width=1.3)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=x, y=df["J"], mode="lines", name="J",
-                                 line=dict(color="#8B5CF6", width=1.1)), row=2, col=1)
-        # 80 以上常被視為超買區、20 以下為超賣區，畫兩條虛線當參考
-        fig.add_hline(y=80, line_dash="dash", line_color=UP_COLOR, line_width=1, row=2, col=1)
-        fig.add_hline(y=20, line_dash="dash", line_color=DOWN_COLOR, line_width=1, row=2, col=1)
-        fig.update_yaxes(title_text="KDJ", row=2, col=1)
+    # --- 技術指標副圖 ---
+    if sub_ind == "MACD":
+        r = row_of["ind"]
+        osc_colors = [up if v >= 0 else down for v in df["OSC"].fillna(0)]
+        fig.add_trace(go.Bar(x=x, y=df["OSC"], marker_color=osc_colors, marker_line_width=0, name="OSC"), row=r, col=1)
+        fig.add_trace(go.Scatter(x=x, y=df["DIF"], mode="lines", name="DIF", line=dict(color=MA_COLORS[5], width=1.2)), row=r, col=1)
+        fig.add_trace(go.Scatter(x=x, y=df["DEA"], mode="lines", name="DEA", line=dict(color=MA_COLORS[20], width=1.2)), row=r, col=1)
+        fig.update_yaxes(title_text="MACD", row=r, col=1)
+    elif sub_ind == "KDJ":
+        r = row_of["ind"]
+        fig.add_trace(go.Scatter(x=x, y=df["K"], mode="lines", name="K", line=dict(color=MA_COLORS[5], width=1.2)), row=r, col=1)
+        fig.add_trace(go.Scatter(x=x, y=df["D"], mode="lines", name="D", line=dict(color=MA_COLORS[20], width=1.2)), row=r, col=1)
+        fig.add_trace(go.Scatter(x=x, y=df["J"], mode="lines", name="J", line=dict(color=MA_COLORS[120], width=1)), row=r, col=1)
+        fig.add_hline(y=80, line_dash="dot", line_color=up, line_width=1, row=r, col=1)
+        fig.add_hline(y=20, line_dash="dot", line_color=down, line_width=1, row=r, col=1)
+        fig.update_yaxes(title_text="KDJ", row=r, col=1)
 
     fig.update_layout(
-        height=700,
-        template="plotly_dark" if dark else "plotly_white",   # 護眼模式用深色底，平常用白底
-        paper_bgcolor="#0E1117" if dark else "white",       # 跟網頁背景同色，看起來才是一體的
-        plot_bgcolor="#0E1117" if dark else "white",
-        xaxis_rangeslider_visible=False,   # 關掉 K 線預設的拉桿
-        hovermode="x unified",             # 滑鼠移到某一根，所有數值一起顯示
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        margin=dict(l=10, r=10, t=30, b=10),
+        height=sum(heights) + 60,
+        paper_bgcolor=t["chart"], plot_bgcolor=t["chart"],
+        font=dict(family="Inter, Noto Sans TC, sans-serif", color=t["muted"], size=12),
+        xaxis_rangeslider_visible=False,      # 關掉 K 線預設的拉桿
+        hovermode="x unified",                # 游標移到某根 K 棒，所有數值（OHLC、均線、量）一起顯示
+        hoverlabel=dict(bgcolor=t["toolbar"], bordercolor=t["border"], font=dict(color=t["text"])),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, font=dict(size=11, color=t["muted"]),
+                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=12, r=12, t=36, b=8),
+        dragmode="zoom",
     )
-    fig.update_xaxes(type="category", nticks=10, showspikes=True, spikemode="across", spikethickness=1)
-    fig.update_yaxes(title_text="股價", row=1, col=1)
+    fig.update_xaxes(type="category", nticks=10, showgrid=False, linecolor=t["border"],
+                     showspikes=True, spikemode="across", spikethickness=1, spikecolor=t["muted"], spikedash="dot")
+    # automargin：讓右側的價格刻度自動保留空間，數字才不會被切掉
+    fig.update_yaxes(gridcolor=t["grid"], zeroline=False, linecolor=t["border"], side="right", automargin=True)
     return fig
 
 
+# ---------------------------------------------------------------------
+# 六、新聞的顯示用小工具（不改變偏多 / 偏空的判斷方式，只是把判斷依據也列出來）
+# ---------------------------------------------------------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_news(query):
+    """呼叫 fetch_news 抓新聞，並記錄抓取的時間（顯示「資料更新時間」用）"""
+    return fetch_news(query), pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y/%m/%d %H:%M")
+
+
+def tone_reasons(title):
+    """列出標題裡出現的偏多 / 偏空關鍵字，當作展開新聞時的「判斷依據」"""
+    text = title.replace("漲跌", "").replace("止跌", "")
+    pos = [w for w in POSITIVE_WORDS if w in text]
+    neg = [w for w in NEGATIVE_WORDS if w in text]
+    return pos, neg
+
+
+TONE_CLASS = {"偏多": "qk-up", "偏空": "qk-down", "中性": "qk-flat"}
+
+
+def news_row(n, with_detail=False):
+    """一則新聞的 HTML：左邊標題與來源時間，右邊小標籤；with_detail=True 時可以點開看判斷依據"""
+    title = html.escape(n["title"])
+    link = html.escape(n["link"], quote=True)
+    when = n["published"].strftime("%Y/%m/%d %H:%M") if n["published"] is not None else ""
+    meta = f'{html.escape(n["source"])}　{when}'
+    tag = f'<span class="qk-tag {TONE_CLASS[n["tone"]]}">{n["tone"]}</span>'
+    if not with_detail:
+        return (f'<div class="qk-item"><div><a href="{link}" target="_blank">{title}</a>'
+                f'<div class="qk-item-meta">{meta}</div></div>{tag}</div>')
+    pos, neg = tone_reasons(n["title"])
+    reason = []
+    if pos:
+        reason.append("偏多關鍵字：" + "、".join(pos))
+    if neg:
+        reason.append("偏空關鍵字：" + "、".join(neg))
+    reason_text = "；".join(reason) if reason else "標題沒有出現偏多或偏空關鍵字，所以判斷為中性"
+    return (f'<details class="qk-detail"><summary><div class="qk-item"><div><div class="qk-item-title">{title}</div>'
+            f'<div class="qk-item-meta">{meta}</div></div>{tag}</div></summary>'
+            f'<div class="qk-detail-body">判斷依據：{html.escape(reason_text)}<br>'
+            f'<a href="{link}" target="_blank">開啟原文 ↗</a></div></details>')
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_currency(symbol):
+    """海外股票的幣別（台股固定 TWD）"""
+    if symbol.endswith((".TW", ".TWO")):
+        return "TWD"
+    try:
+        return yf.Ticker(symbol).fast_info["currency"] or ""
+    except Exception:
+        return ""
+
+
+def go_to_news():
+    """「查看全部」按鈕：切換到相關新聞分頁"""
+    st.session_state.page = "相關新聞"
+
+
+def on_span_change():
+    """切換資料跨度時，自動帶入合適的 K 棒週期（使用者之後仍然可以自己改）"""
+    st.session_state.interval = DEFAULT_INTERVAL.get(st.session_state.span, "日線")
+
+
 # =====================================================================
-# 六、網頁畫面
+# 七、網頁畫面
 # =====================================================================
-st.title("📈 股票 K 線與技術指標")
-st.caption("資料來源：Yahoo Finance（yfinance）｜台股慣例：紅漲綠跌｜僅供學習研究，非投資建議")
+# --- 所有設定的預設值（存在 session_state，重新整理畫面時不會跑掉） ---
+DEFAULTS = {"ticker": "2330", "dark": True, "span": "1 年", "interval": "日線", "show_vol": True,
+            "sub_ind": "無", "show_bb": False, "page": "走勢圖", "news_filter": "全部新聞"}
+DEFAULTS.update({f"ma{n}": n in (5, 10, 20) for n in MA_COLORS})
+for k, v in DEFAULTS.items():
+    st.session_state.setdefault(k, v)
 
-# --- 上方：代碼、週期、跨度 ---
-c1, c2, c3 = st.columns([1.2, 1, 1])
-stock_code = c1.text_input("股票代碼", value="2330", help="台股輸入數字即可（例如 2330、6488），美股輸入英文代碼（例如 AAPL）")
-# 先放「資料跨度」：選到 1 / 5 / 10 / 20 天時會自動改用分 K，這時「週期」選單就沒有作用，要變成灰色
-period_name = c3.selectbox("資料跨度", PERIOD_OPTIONS, index=PERIOD_OPTIONS.index("1 年"))
-short = period_name in SHORT_PERIODS
-interval_name = c2.selectbox("週期", list(INTERVALS.keys()), index=0, disabled=short,
-                             help="資料跨度選 1～20 天時，會自動改用分 K（像 Yahoo 的 1 日 / 5 日走勢）")
-interval = INTERVALS[interval_name]
+theme = THEMES["dark" if st.session_state.dark else "light"]
+st.markdown(build_css(theme), unsafe_allow_html=True)
 
-# --- 側邊欄：均線 ---
-with st.sidebar:
-    # 護眼模式：打開後網頁和 K 線圖都換成深色
-    st_version = tuple(int(x) for x in st.__version__.split(".")[:2])
-    # 半黑半白的圓形圖示：常見的「深淺色切換」符號，簡單不花俏
-    # 新版 Streamlit 可以用 Google Material 圖示；舊版不支援，就用文字符號 ◐
-    icon = ":material/contrast:" if st_version >= (1, 36) else "◐"
-    dark_mode = st.toggle(icon, value=False)   # 打開 = 護眼模式（深色）
-    if dark_mode:
-        st.markdown(DARK_CSS, unsafe_allow_html=True)
-    st.divider()
+# ---------------------------------------------------------------------
+# 頂部導覽列：左邊網站名稱，右邊搜尋框 + 主題切換
+# ---------------------------------------------------------------------
+col_kwargs = {"vertical_alignment": "center"} if ST_VERSION >= (1, 36) else {}
+nav1, nav2, nav3 = st.columns([6, 2.4, 0.5], **col_kwargs)
+nav1.markdown('<span class="qk-mark qk-nav"></span>', unsafe_allow_html=True)   # 給 CSS 辨識導覽列用的記號（不顯示）
+nav1.markdown(
+    '<div class="qk-brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/>'
+    '<polyline points="15 7 21 7 21 13"/></svg>股票分析</div>',
+    unsafe_allow_html=True,
+)
+nav2.text_input("搜尋股票", key="ticker", placeholder="搜尋代碼，例如 2330、AAPL", label_visibility="collapsed")
+theme_icon = ":material/contrast:" if ST_VERSION >= (1, 36) else "◐"
+nav3.toggle(theme_icon, key="dark")   # 打開 = 深色主題，關掉 = 淺色主題
 
-    st.header("均線設定")
-    st.caption("預設只顯示 MA5 / 10 / 20，需要時再勾選其他均線")
-    show_ma = {}
-    for n in MA_COLORS:
-        show_ma[n] = st.checkbox(MA_NAMES[n], value=(n in (5, 10, 20)))
-    st.divider()
-    st.header("其他指標")
-    show_bb = st.checkbox("布林通道 (20, 2)", value=False, help="中軌 = MA20，上下軌 = 中軌 ± 2 倍標準差")
-
+stock_code = st.session_state.ticker
 if stock_code.strip() == "":
-    st.info("請輸入股票代碼")
+    st.info("請在右上角輸入股票代碼，例如 2330（台積電）、6488（環球晶）、AAPL（蘋果）。")
     st.stop()
 
 # ---------------------------------------------------------------------
-# 決定要抓多少資料
+# 決定要抓多少資料（依照「資料跨度」和「K 棒週期」）
 # ---------------------------------------------------------------------
+span = st.session_state.span
+interval_name = st.session_state.interval
+iv = INTERVALS[interval_name]
+kind, amount = SPANS[span]
+span_label = span           # 畫面上「近 X 最高 / 最低」的 X
 notice = None
-if short:
-    # 短跨度：自動改用分 K
-    n_days, yf_interval, bar_label, fetch_period = SHORT_PERIODS[period_name]
-    fetch_kwargs = {"period": fetch_period}
-    notice = f"資料跨度 {period_name}：自動改用 {bar_label} 顯示（日 K 只有 {n_days} 根，看不出走勢）。"
+today = pd.Timestamp.today().normalize()
+
+if iv["intraday"]:
+    # 分 K：Yahoo 有天數限制，跨度太長就自動縮短
+    want_days = int(amount * 1.5) + 6 if kind == "d" else amount * 31    # 換算成日曆天（含週末）
+    if want_days > iv["max_days"]:
+        notice = f"Yahoo Finance 的 {interval_name} K 只提供最近約 {iv['max_days'] + 1} 天資料，已改為顯示最近 {iv['max_days']} 天。"
+        kind, amount = "cal", iv["max_days"]
+        want_days = iv["max_days"]
+        span_label = f"{iv['max_days']} 天"
+    fetch_days = min(iv["max_days"], want_days + iv["warmup_days"])
+    fetch_kwargs = {"period": f"{fetch_days}d"}
 else:
-    months = PERIODS[period_name]
-    yf_interval, bar_label = interval["yf_interval"], interval_name
-    # 週線、月線跨度太短時自動拉長
+    # 日 / 週 / 月線
     min_m = MIN_MONTHS.get(interval_name, 0)
-    if months < min_m:
-        notice = f"{interval_name}選 {period_name} 只會有很少幾根 K 棒，已自動改為 {min_m // 12 if min_m >= 12 else min_m}{' 年' if min_m >= 12 else ' 個月'}。"
-        months = min_m
-    # 顯示的起始日期 = 今天往前推 N 個月；實際抓的起始日期再往前多抓暖機資料
-    show_start = pd.Timestamp.today().normalize() - pd.DateOffset(months=months)
-    fetch_start = show_start - pd.Timedelta(days=WARMUP_DAYS[interval_name])
+    if (kind == "d" and min_m) or (kind == "m" and amount < min_m):
+        new_span = "1 年" if min_m >= 12 else f"{min_m} 個月"
+        notice = f"{interval_name}選 {span} 只會有很少幾根 K 棒，已改為顯示 {new_span}。"
+        kind, amount, span_label = "m", min_m, new_span
+    if kind == "m":
+        show_start = today - pd.DateOffset(months=amount)
+        fetch_start = show_start - pd.Timedelta(days=WARMUP_DAYS[interval_name])
+    else:   # 日線 + 1～20 天：抓最近一段日 K，再取最後 N 個交易日
+        fetch_start = today - pd.Timedelta(days=amount * 2 + 15 + WARMUP_DAYS[interval_name])
     fetch_kwargs = {"start": fetch_start.strftime("%Y-%m-%d")}
 
 # ---------------------------------------------------------------------
-# 抓資料（台股上市、上櫃都試，有資料就停）
+# 抓資料（台股上市、上櫃都試，有資料就停；Yahoo 偶爾失敗會自動重試）
 # ---------------------------------------------------------------------
-df, symbol = None, None
-last_error = None
+df, symbol, last_error = None, None, None
 for s in to_yahoo_symbols(stock_code):
-    # Yahoo 偶爾會在短時間內回傳空資料或連線失敗，所以每個代碼最多試 3 次，
-    # 每次失敗先清掉快取（不然會一直拿到快取裡的空資料），再等一下重抓
     for attempt in range(3):
         try:
-            data = download_history(s, yf_interval, **fetch_kwargs)
+            data = download_history(s, iv["yf"], **fetch_kwargs)
         except Exception as e:
             data, last_error = None, e
         if data is not None and not data.empty:
@@ -632,48 +830,45 @@ for s in to_yahoo_symbols(stock_code):
 if df is None and last_error is not None:
     st.error(f"資料下載失敗，請檢查網路連線後再試一次。（錯誤訊息：{last_error}）")
     st.stop()
-
 if df is None:
     st.warning("找不到此股票代碼，請重新輸入")
     st.stop()
 
-if notice:
-    st.info(notice)
-
-# 只保留需要的欄位；把時區拿掉（保留交易所當地時間），resample 和顯示才不會出錯
+# 只保留需要的欄位；把時區拿掉（保留交易所當地時間）
 df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 if df.index.tz is not None:
     df.index = df.index.tz_localize(None)
+if iv["resample"]:
+    df = resample_ohlcv(df, iv["resample"])
 
-# 週線、月線：用日線自己 resample（分 K 不用）
-if not short and interval["resample"]:
-    df = resample_ohlcv(df, interval["resample"])
-
-# ---------------------------------------------------------------------
 # 計算指標：一定要用「完整資料（含暖機）」算完，再切出要顯示的範圍
-# ---------------------------------------------------------------------
 df = add_moving_averages(df)
 df = add_macd(df)
 df = add_kdj(df)
 df = add_bollinger(df)
 
-# 只顯示使用者選的跨度（前面多抓的暖機資料只用來算指標，不畫出來）
-if short:
-    # 分 K：找出資料裡所有的交易日，取最後 N 個交易日
-    # （用「交易日」而不是「日曆天」，週末或連假時 1 天才會顯示最近一個有開盤的日子）
-    trade_days = sorted(set(df.index.date))
-    keep_days = trade_days[-n_days:]
+# 切出要顯示的範圍
+if kind == "d":
+    # 最近 N 個「交易日」（週末、連假時會往前找有開盤的日子）
+    keep_days = sorted(set(df.index.date))[-amount:]
     show_df = df[df.index.date >= keep_days[0]]
-    x_format = "%H:%M" if n_days == 1 else "%m/%d %H:%M"
+elif kind == "cal":
+    show_df = df[df.index >= today - pd.Timedelta(days=amount)]
 else:
     show_df = df[df.index >= show_start]
-    x_format = "%Y/%m" if interval_name == "月線" else "%Y/%m/%d"
 
-if len(show_df) < 2:
-    st.warning("這個區間的資料太少，畫不出 K 線，請選擇較長的資料跨度。")
+if iv["intraday"]:
+    x_format = "%H:%M" if len(set(show_df.index.date)) == 1 else "%m/%d %H:%M"
+    date_fmt = "%Y/%m/%d %H:%M"
+else:
+    x_format = "%Y/%m" if interval_name == "月線" else "%Y/%m/%d"
+    date_fmt = "%Y/%m/%d"
+
+if show_df.empty:
+    st.warning("這個區間沒有資料，請換一個資料跨度或 K 棒週期。")
     st.stop()
 
-# 台股成交量換成「張」（1 張 = 1000 股）
+# 台股成交量換成「張」（1 張 = 1000 股）；其他市場維持「股」
 is_tw = symbol.endswith((".TW", ".TWO"))
 vol_unit = "張" if is_tw else "股"
 show_df = show_df.copy()
@@ -681,127 +876,233 @@ if is_tw:
     show_df["Volume"] = show_df["Volume"] / 1000
 
 # ---------------------------------------------------------------------
-# 標題與重點數字
+# 股票名稱與價格
 # ---------------------------------------------------------------------
 name = get_stock_name(symbol)
-st.subheader(f"{name}（{symbol}）")
-
 last = show_df.iloc[-1]
-if short:
-    # 分 K 的漲跌要跟「前一個交易日的收盤價」比（跟看盤軟體一樣），不是跟前一根 5 分 K 比
-    before_today = df[df.index.date < show_df.index[-1].date()]
-    prev_close = before_today["Close"].iloc[-1] if len(before_today) else show_df["Open"].iloc[0]
+if iv["intraday"]:
+    # 分 K：跟「前一個交易日的收盤價」比，跟看盤軟體一樣
+    before = df[df.index.date < show_df.index[-1].date()]
+    prev_close = before["Close"].iloc[-1] if len(before) else show_df["Open"].iloc[0]
 else:
-    prev_close = show_df["Close"].iloc[-2]
+    # 日 / 週 / 月線：跟前一根 K 棒的收盤價比（用完整資料，所以跨度只有 1 根時也算得出來）
+    prev_close = df["Close"].iloc[-2] if len(df) > 1 else last["Open"]
 change = last["Close"] - prev_close
-pct = change / prev_close * 100
+pct = change / prev_close * 100 if prev_close else 0
+# 漲跌除了顏色，也用 ▲▼ 和正負號表示，色弱的人也分得出來
+if change > 0:
+    chg_cls, arrow = "qk-up", "▲"
+elif change < 0:
+    chg_cls, arrow = "qk-down", "▼"
+else:
+    chg_cls, arrow = "qk-flat", ""
 
-m1, m2, m3, m4, m5 = st.columns(5)
-# delta_color="inverse"：讓正數顯示紅色、負數顯示綠色，符合台股習慣
-m1.metric("最新價" if short else "收盤價", f"{last['Close']:,.2f}", f"{change:+,.2f} ({pct:+.2f}%)",
-          delta_color="inverse", help="與前一交易日收盤價相比" if short else "與前一根 K 棒收盤價相比")
-m2.metric("區間最高", f"{show_df['High'].max():,.2f}")
-m3.metric("區間最低", f"{show_df['Low'].min():,.2f}")
-m4.metric(f"{'最新一根' if short else '最新'}成交量（{vol_unit}）", f"{last['Volume']:,.0f}")
-m5.metric("K / D", f"{last['K']:.1f} / {last['D']:.1f}" if pd.notna(last["K"]) else "—")
+market = "台灣上櫃" if symbol.endswith(".TWO") else ("台灣上市" if symbol.endswith(".TW") else "海外市場")
+currency = get_currency(symbol)
+vol_label = "成交量（最新一根）" if iv["intraday"] else ("成交量" if interval_name == "日線" else f"成交量（本{interval_name[0]}）")
+kd_text = f"{last['K']:.1f} / {last['D']:.1f}" if pd.notna(last["K"]) else "—"
 
-date_fmt = "%Y/%m/%d %H:%M" if short else "%Y/%m/%d"
-st.caption(f"顯示範圍：{show_df.index[0].strftime(date_fmt)} ～ {show_df.index[-1].strftime(date_fmt)}，"
-           f"共 {len(show_df)} 根 {bar_label}")
+st.markdown(
+    f'<div class="qk-head">'
+    f'<div class="qk-name">{html.escape(str(name))}<span class="qk-code">{html.escape(symbol)}</span></div>'
+    f'<div class="qk-price-row"><span class="qk-price">{last["Close"]:,.2f}</span>'
+    f'<span class="qk-chg {chg_cls}">{arrow} {change:+,.2f}（{pct:+.2f}%）</span></div>'
+    f'<div class="qk-meta">{market} · {html.escape(currency)} · 資料時間 {show_df.index[-1].strftime(date_fmt)}'
+    f'（交易所當地時間，Yahoo 資料可能延遲）</div>'
+    f'<div class="qk-stats">'
+    f'<div class="qk-stat"><label>近 {span_label}最高</label><b>{show_df["High"].max():,.2f}</b></div>'
+    f'<div class="qk-stat"><label>近 {span_label}最低</label><b>{show_df["Low"].min():,.2f}</b></div>'
+    f'<div class="qk-stat"><label>{vol_label}（{vol_unit}）</label><b>{last["Volume"]:,.0f}</b></div>'
+    f'<div class="qk-stat"><label>K / D</label><b>{kd_text}</b></div>'
+    f'</div></div>',
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------
-# 用頁籤分開：圖表 / 新聞 / 資料表 / 指標說明，畫面才不會一次攤太多東西
+# 分頁：用 radio 做成簡約的文字分頁（這樣「查看全部」按鈕才能切換到新聞頁）
 # ---------------------------------------------------------------------
-tab_chart, tab_news, tab_data, tab_help = st.tabs(["📊 K 線圖", "📰 相關新聞", "📋 歷史資料", "📖 指標說明"])
+pg1 = st.columns(1)[0]   # 放進 columns 裡，CSS 才能用 qk-pagenav 這個記號找到這一排
+pg1.radio("分頁", ["走勢圖", "相關新聞", "歷史資料", "指標說明"], key="page", horizontal=True,
+          label_visibility="collapsed")
+pg1.markdown('<span class="qk-mark qk-pagenav"></span>', unsafe_allow_html=True)
+page = st.session_state.page
+code = symbol.replace(".TWO", "").replace(".TW", "")
+news_query = f"{name} {code}" if is_tw else f"{name} {symbol} 股票"
 
-with tab_chart:
-    sub_chart = st.selectbox("副圖指標", ["成交量", "MACD", "KDJ"], index=0)
+# =====================================================================
+# 分頁 1：走勢圖
+# =====================================================================
+if page == "走勢圖":
+    # --- 圖表工具列：左邊資料跨度，右邊 K 棒週期、均線 / 指標、副圖 ---
+    tb1, tb2, tb3, tb4 = st.columns([5.2, 1.1, 1.2, 1.1], **col_kwargs)
+    tb1.radio("資料跨度", list(SPANS), key="span", horizontal=True, label_visibility="collapsed",
+              on_change=on_span_change)
+    tb1.markdown('<span class="qk-mark qk-toolbar"></span>', unsafe_allow_html=True)
+    tb2.selectbox("K 棒週期", list(INTERVALS), key="interval", label_visibility="collapsed",
+                  format_func=lambda v: f"K 棒：{v}")
+    pop_kwargs = {"width": "stretch"} if ST_VERSION >= (1, 46) else {"use_container_width": True}
+    with tb3.popover("均線・指標", **pop_kwargs):
+        st.caption("均線（依目前 K 棒週期計算）")
+        for n in MA_COLORS:
+            st.checkbox(MA_NAMES[n], key=f"ma{n}")
+        st.caption("其他")
+        st.checkbox("布林通道 (20, 2)", key="show_bb")
+        st.checkbox("成交量", key="show_vol")
+    tb4.selectbox("副圖指標", ["無", "MACD", "KDJ"], key="sub_ind", label_visibility="collapsed",
+                  format_func=lambda v: "副圖：無" if v == "無" else f"副圖：{v}")
 
-    # 長均線資料不夠時提醒（例如月線只抓得到幾年，MA240 需要 20 年）
+    if notice:
+        st.caption("ⓘ " + notice)
+
+    show_ma = {n: st.session_state[f"ma{n}"] for n in MA_COLORS}
     missing = [MA_NAMES[n] for n, c in show_ma.items() if c and show_df[f"MA{n}"].isna().all()]
     if missing:
-        st.warning(f"{'、'.join(missing)} 需要的 K 棒數超過可取得的資料，因此無法畫出。")
+        st.caption(f"ⓘ {'、'.join(missing)} 需要的 K 棒數超過可取得的資料，因此沒有畫出。")
 
-    fig = draw_chart(show_df, show_ma, sub_chart, x_format, vol_unit, dark=dark_mode, show_bb=show_bb)
-    # theme=None：不要套用 Streamlit 自己的圖表主題，否則護眼模式下圖例、格線還是淺色系
-    st.plotly_chart(fig, use_container_width=True, theme=None)
+    fig = draw_chart(show_df, show_ma, st.session_state.show_bb, st.session_state.show_vol,
+                     st.session_state.sub_ind, x_format, vol_unit, theme)
+    # theme=None：不要套用 Streamlit 自己的圖表主題，否則顏色會被蓋掉
+    st.plotly_chart(fig, use_container_width=True, theme=None,
+                    config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
+    st.caption(f"顯示 {show_df.index[0].strftime(date_fmt)} ～ {show_df.index[-1].strftime(date_fmt)}，"
+               f"共 {len(show_df)} 根 {interval_name} K　·　拖曳可縮放，雙擊還原")
 
-with tab_news:
-    code = symbol.replace(".TWO", "").replace(".TW", "")
+    # --- 新聞預覽：最近 5 則 ---
+    nh1, nh2, _ = st.columns([5.6, 1.1, 1.9], **col_kwargs)   # 跟新聞列表同寬（約 1080px），按鈕才會對齊在列表右上角
+    nh1.markdown('<div class="qk-section"><div class="qk-section-title">相關新聞</div></div>', unsafe_allow_html=True)
+    btn_kwargs = {"type": "tertiary"} if ST_VERSION >= (1, 42) else {}
+    nh2.button("查看全部 →", on_click=go_to_news, **btn_kwargs)
+    try:
+        news_list, _ = get_news(news_query)
+    except Exception:
+        news_list = None
+    if news_list:
+        st.markdown('<div class="qk-news">' + "".join(news_row(n) for n in news_list[:5]) + "</div>",
+                    unsafe_allow_html=True)
+    elif news_list is None:
+        st.caption("新聞暫時抓不到，請稍後再試。")
+    else:
+        st.caption("找不到這檔股票的相關新聞。")
 
-    # --- 1. 公司重大訊息（只有台股才有，而且 API 只提供當天的公告） ---
+# =====================================================================
+# 分頁 2：相關新聞（新聞分析）
+# =====================================================================
+elif page == "相關新聞":
+    try:
+        news_list, news_time = get_news(news_query)
+    except Exception as e:
+        news_list, news_time = None, ""
+        st.warning(f"新聞暫時抓不到，請稍後再試。（{e}）")
+
+    # --- 今日公司重大訊息（只有台股，而且 API 只提供當天公告） ---
     if is_tw:
         try:
             announcements = [a for a in fetch_material_info() if a["code"] == code]
         except Exception:
             announcements = []
-        if announcements:
-            st.markdown("##### 📢 今日公司重大訊息（公開資訊觀測站）")
-            for a in announcements:
-                with st.expander(f"{a['date']}｜{a['subject'][:60]}"):
-                    st.text(a["detail"])
-        else:
-            st.caption("今日沒有這家公司的重大訊息公告（資料來源：證交所 / 櫃買中心 OpenAPI，只提供當天公告）。")
-
-    # --- 2. 新聞列表 ---
-    # 台股用「中文名稱 + 代碼」搜尋，海外股票用「名稱 + 代碼」
-    query = f"{name} {code}" if is_tw else f"{name} {symbol} 股票"
-    try:
-        news_list = fetch_news(query)
-    except Exception as e:
-        news_list = None
-        st.warning(f"新聞暫時抓不到，請稍後再試。（{e}）")
+        for a in announcements:
+            with st.expander(f"📢 今日重大訊息｜{a['date']}｜{a['subject'][:60]}"):
+                st.text(a["detail"])
 
     if news_list is not None and len(news_list) == 0:
         st.info("找不到這檔股票的相關新聞。")
     elif news_list:
-        # 統計三種傾向各有幾則
-        counts = {t: sum(1 for n in news_list if n["tone"] == t) for t in ["偏多", "偏空", "中性"]}
-        left, right = st.columns([2, 3])
-        left.markdown(f"##### 最新 {len(news_list)} 則新聞")
-        tone_filter = right.radio("篩選", ["全部", "偏多", "偏空", "中性"], horizontal=True,
-                                  label_visibility="collapsed",
-                                  format_func=lambda t: t if t == "全部" else f"{t} {counts[t]}")
-        st.caption("偏多 / 偏空是用標題關鍵字簡單判斷，只是方便快速瀏覽，不代表對股價的實際影響。")
+        total = len(news_list)
+        cnt = {t_: sum(1 for n in news_list if n["tone"] == t_) for t_ in ["偏多", "中性", "偏空"]}
+        # 淨情緒分數 =（偏多則數 − 偏空則數）÷ 總則數 × 100，範圍 −100 ～ +100
+        # 只是把現有的「偏多 / 偏空」分類做統計，沒有新增新的情緒判斷公式
+        score = (cnt["偏多"] - cnt["偏空"]) / total * 100
+        overall = "偏多" if score > 20 else ("偏空" if score < -20 else "中性")
+        score_cls = TONE_CLASS[overall]
+        # 近期變化：比較「較新的一半」與「較舊的一半」新聞的淨分數（只是這批新聞內的比較，不是長期趨勢）
+        half = total // 2
+        newer, older = news_list[:half], news_list[half:]
+        def net(items):
+            return (sum(1 for n in items if n["tone"] == "偏多") - sum(1 for n in items if n["tone"] == "偏空")) / len(items) * 100 if items else 0
+        delta = net(newer) - net(older) if half else 0
+        delta_txt = f"{'▲' if delta > 0 else ('▼' if delta < 0 else '')} {delta:+.0f}"
+        ratio = f"{cnt['偏多'] / cnt['偏空']:.1f}" if cnt["偏空"] else "—"
 
-        tone_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": "#9CA3AF"}   # 一樣用紅漲綠跌
-        for n in news_list:
-            if tone_filter != "全部" and n["tone"] != tone_filter:
-                continue
-            when = n["published"].strftime("%m/%d %H:%M") if n["published"] is not None else ""
-            # 新聞標題是外部網站的文字，放進 HTML 前先用 html.escape 轉義，避免裡面的符號破壞版面
-            title, source, link = html.escape(n["title"]), html.escape(n["source"]), html.escape(n["link"], quote=True)
-            st.markdown(
-                f'<div style="padding:8px 0; border-bottom:1px solid rgba(128,128,128,0.2);">'
-                f'<a href="{link}" target="_blank" style="text-decoration:none; font-weight:600;">{title}</a><br>'
-                f'<span style="font-size:0.8rem; opacity:0.7;">{source}　{when}　</span>'
-                f'<span style="font-size:0.75rem; color:{tone_color[n["tone"]]}; '
-                f'border:1px solid {tone_color[n["tone"]]}; border-radius:4px; padding:0 5px;">{n["tone"]}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        st.caption("新聞來源：Google 新聞 RSS 搜尋結果，點標題可開啟原文。")
+        # --- 新聞分析總覽 ---
+        st.markdown(
+            f'<div class="qk-news"><div class="qk-section"><div class="qk-section-title">新聞分析總覽</div>'
+            f'<div class="qk-note">資料更新 {news_time}</div></div>'
+            f'<div class="qk-overview">'
+            f'<div class="qk-ov"><label>淨情緒分數（−100 ～ +100）</label><span class="qk-score {score_cls}">{score:+.0f}</span></div>'
+            f'<div class="qk-ov"><label>整體判斷</label><b class="{score_cls}">{overall}</b></div>'
+            f'<div class="qk-ov"><label>近期變化（較新 {half} 則 vs 較舊 {total - half} 則）</label><b>{delta_txt}</b></div>'
+            f'<div class="qk-ov"><label>多空比</label><b>{ratio}</b></div>'
+            f'<div class="qk-ov"><label>已分析新聞</label><b>{total} 則</b></div>'
+            f'</div>'
+            f'<div class="qk-bar">'
+            f'<div style="width:{cnt["偏多"] / total * 100:.1f}%; background:{theme["up"]}"></div>'
+            f'<div style="width:{cnt["中性"] / total * 100:.1f}%; background:{theme["muted"]}"></div>'
+            f'<div style="width:{cnt["偏空"] / total * 100:.1f}%; background:{theme["down"]}"></div></div>'
+            f'<div class="qk-bar-legend"><span class="qk-up">偏多 {cnt["偏多"] / total * 100:.0f}%（{cnt["偏多"]} 則）</span>'
+            f'<span>中性 {cnt["中性"] / total * 100:.0f}%（{cnt["中性"]} 則）</span>'
+            f'<span class="qk-down">偏空 {cnt["偏空"] / total * 100:.0f}%（{cnt["偏空"]} 則）</span></div>'
+            f'<div class="qk-note" style="margin-top:6px">偏多 / 偏空以標題關鍵字判斷，淨情緒分數 = (偏多 − 偏空) ÷ 總則數 × 100；'
+            f'+20 以上視為偏多、−20 以下視為偏空，僅供快速瀏覽。</div>'
 
-with tab_data:
-    cols = ["Open", "High", "Low", "Close", "Volume"] + [f"MA{n}" for n in MA_COLORS] + ["DIF", "DEA", "OSC", "K", "D", "J", "BB_UP", "BB_LOW"]
+            # --- 情緒趨勢圖：目前沒有歷史資料，顯示空狀態（不拿這 20 則新聞假裝成長期趨勢） ---
+            f'<div class="qk-section"><div class="qk-section-title">情緒趨勢</div></div>'
+            f'<div class="qk-empty" style="margin-top:12px">尚無歷史情緒資料<br>'
+            f'目前只有最新 {total} 則新聞的即時分析；需要每天記錄情緒分數後，才能畫出 7 日 / 30 日的趨勢。（規劃中）</div>'
+
+            # --- AI 分析摘要：目前沒有 AI 摘要功能，只顯示空狀態 ---
+            f'<div class="qk-section"><div class="qk-section-title">AI 分析摘要</div>'
+            f'<div class="qk-note">生成時間：—</div></div>'
+            f'<div class="qk-panel" style="margin-top:12px"><div class="qk-note">'
+            f'尚未產生 AI 摘要。這個區塊預留給下一階段的「整體情緒」與「重要觀察」自動摘要，目前不會顯示任何 AI 生成內容。'
+            f'</div></div></div>',
+            unsafe_allow_html=True,
+        )
+        st.button("重新分析（下一階段開放）", disabled=True)
+
+        # --- 新聞明細：左邊標題 + 則數，右邊小型篩選選單 ---
+        bottom = {"vertical_alignment": "bottom"} if ST_VERSION >= (1, 36) else {}
+        d1, d2, _ = st.columns([3, 1.2, 1.2], **bottom)   # 篩選選單跟「新聞明細」標題底部對齊
+        shown = [n for n in news_list if st.session_state.news_filter == "全部新聞" or n["tone"] == st.session_state.news_filter]
+        d1.markdown(f'<div class="qk-section"><div class="qk-section-title">新聞明細<span>{len(shown)} 則</span></div></div>',
+                    unsafe_allow_html=True)
+        d2.selectbox("篩選", ["全部新聞", "偏多", "中性", "偏空"], key="news_filter", label_visibility="collapsed",
+                     format_func=lambda v: f"篩選：{v}")
+        if shown:
+            st.markdown('<div class="qk-news">' + "".join(news_row(n, with_detail=True) for n in shown) + "</div>",
+                        unsafe_allow_html=True)
+        else:
+            st.caption("這個分類目前沒有新聞。")
+        st.caption("新聞來源：Google 新聞 RSS 搜尋結果；點新聞可展開判斷依據與原文連結。")
+
+# =====================================================================
+# 分頁 3：歷史資料
+# =====================================================================
+elif page == "歷史資料":
+    cols = ["Open", "High", "Low", "Close", "Volume"] + [f"MA{n}" for n in MA_COLORS] + \
+           ["DIF", "DEA", "OSC", "K", "D", "J", "BB_UP", "BB_LOW"]
     table = show_df[cols].sort_index(ascending=False)
     table.index = table.index.strftime(date_fmt)
-    table.index.name = "時間" if short else "日期"
+    table.index.name = "時間" if iv["intraday"] else "日期"
     table = table.rename(columns={"Open": "開盤", "High": "最高", "Low": "最低", "Close": "收盤",
                                   "Volume": f"成交量({vol_unit})", "BB_UP": "布林上軌", "BB_LOW": "布林下軌"})
-    if dark_mode:
+    st.write("")
+    if st.session_state.dark:
+        # 深色模式：用 pandas Styler 把每一格換成深色
         styled = table.round(2).style.format(precision=2).set_properties(
-            **{"background-color": "#1A1D24", "color": "#E6E6E6"})
-        st.dataframe(styled, use_container_width=True, height=450)
+            **{"background-color": theme["chart"], "color": theme["text"]})
+        st.dataframe(styled, use_container_width=True, height=520)
     else:
-        st.dataframe(table.round(2), use_container_width=True, height=450)
+        st.dataframe(table.round(2), use_container_width=True, height=520)
     st.download_button("下載 CSV", table.round(4).to_csv().encode("utf-8-sig"),
-                       file_name=f"{symbol}_{yf_interval}.csv", mime="text/csv")
+                       file_name=f"{symbol}_{iv['yf']}.csv", mime="text/csv")
 
-with tab_help:
+# =====================================================================
+# 分頁 4：指標說明
+# =====================================================================
+else:
     st.markdown(
         """
-**移動平均線 MA**：最近 N 根 K 棒收盤價的平均（`rolling(N).mean()`）。依目前選的週期計算，
+**移動平均線 MA**：最近 N 根 K 棒收盤價的平均（`rolling(N).mean()`）。依目前選的 K 棒週期計算，
 例如週線的 MA20 是 20 根週 K 的平均。日線的 MA20 / 60 / 120 / 240 分別俗稱月線、季線、半年線、年線。
 
 **MACD (12, 26, 9)**：DIF = EMA12 − EMA26；DEA = DIF 的 9 期 EMA；柱狀圖 OSC = DIF − DEA。
@@ -813,7 +1114,12 @@ K = 2/3 × 前 K + 1/3 × RSV；D = 2/3 × 前 D + 1/3 × K；J = 3K − 2D。K�
 
 **週線 / 月線**：由日線 resample 而來：開盤取第一天、最高取最大、最低取最小、收盤取最後一天、成交量加總。
 
+**分 K**：資料跨度選 1 / 5 / 10 / 20 天時，自動帶入 5 / 15 / 60 分 K（可以再手動改）。
+Yahoo Finance 的 5、15 分 K 只提供最近 60 天，60 分 K 約 730 天，超過會自動縮短。
+
 **新聞**：Google 新聞 RSS 搜尋「股票名稱 + 代碼」，依標題去除重複後按時間排序；偏多 / 偏空為標題關鍵字判斷。
 重大訊息來自證交所、櫃買中心 OpenAPI 的每日公告。
         """
     )
+
+st.caption("資料來源：Yahoo Finance（yfinance）、證交所 / 櫃買中心 OpenAPI、Google 新聞｜台股慣例紅漲綠跌｜僅供學習研究，非投資建議")

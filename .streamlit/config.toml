@@ -1,2 +1,4 @@
 [theme]
 base = "light"
+# 操作元件（開關、核取方塊）用低彩度藍色，避免跟「上漲紅」混淆
+primaryColor = "#6F95D8"
