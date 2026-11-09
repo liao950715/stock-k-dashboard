@@ -7,11 +7,11 @@
 #
 # 功能：
 #   1. 週期（Interval）：日線、週線、月線
-#   2. 資料跨度（Period）：1 個月、3 個月、6 個月、1 年、2 年、3 年、5 年
+#   2. 資料跨度（Period）：1 天、5 天、10 天、20 天（自動改用分 K）、1 個月 ～ 5 年
 #   3. 均線：MA5、MA10、MA20、MA60（季線）、MA120（半年線）、MA240（年線）
 #   4. 副圖指標（下拉切換）：成交量、MACD、KDJ；主圖可加布林通道
 #   5. 相關新聞：Google 新聞 RSS + 證交所 / 櫃買中心每日重大訊息
-#   6. 護眼模式（深色）開關
+#   6. 護眼模式（深色）開關（側邊欄的 ◐ 圖示）
 #   7. 台股慣例：紅漲綠跌
 #
 # 執行方式：streamlit run stock_dashboard.py
@@ -104,8 +104,22 @@ INTERVALS = {
     "月線": {"yf_interval": "1d", "resample": "M"},
 }
 
-# 資料跨度選項（以「月」為單位，之後用 pd.DateOffset 往回推起始日期）
+# 短跨度（以「交易日」為單位）：如果還用日 K，1 天只有 1 根、5 天只有 5 根，看不出走勢，
+# 所以跟 Yahoo 的「1 日 / 5 日走勢」一樣，自動改用分 K：
+#   (交易日數, 丟給 yfinance 的分 K 間隔, 顯示名稱, 抓幾天資料)
+#   「抓幾天」比顯示的天數多很多，一來是暖機資料（例如 5 分 K 的 MA240 要前面 240 根 = 約 4 個交易日），
+#   二來是遇到週末、連假時，往前才找得到足夠的交易日。
+#   Yahoo 的限制：5 分 K、15 分 K 只能抓最近 60 天，60 分 K 可以抓 730 天，所以天數都在限制內。
+SHORT_PERIODS = {
+    "1 天":  (1,  "5m",  "5 分 K",  "30d"),
+    "5 天":  (5,  "15m", "15 分 K", "59d"),
+    "10 天": (10, "60m", "60 分 K", "180d"),
+    "20 天": (20, "60m", "60 分 K", "180d"),
+}
+
+# 一般跨度（以「月」為單位，之後用 pd.DateOffset 往回推起始日期）
 PERIODS = {"1 個月": 1, "3 個月": 3, "6 個月": 6, "1 年": 12, "2 年": 24, "3 年": 36, "5 年": 60}
+PERIOD_OPTIONS = list(SHORT_PERIODS) + list(PERIODS)   # 下拉選單：短的在前、長的在後
 
 # 週線、月線如果跨度太短，K 棒會少到看不出東西（例如月線只看 1 個月 = 1 根），
 # 所以設一個合理的最短跨度
@@ -133,13 +147,17 @@ def to_yahoo_symbols(code):
 
 
 @st.cache_data(ttl=600, show_spinner="正在向 Yahoo Finance 抓取資料…")
-def download_history(symbol, yf_interval, start):
+def download_history(symbol, yf_interval, start=None, period=None):
     """
-    向 Yahoo Finance 抓歷史資料（從 start 這天抓到今天）。
+    向 Yahoo Finance 抓歷史資料。
+    日 K 用 start（從某天抓到今天）；分 K 用 period（例如 "30d" = 最近 30 天）。
     加上 st.cache_data 快取 10 分鐘：切換均線、副圖時不會重新下載，也避免被 Yahoo 擋。
     """
     ticker = yf.Ticker(symbol)
-    df = ticker.history(start=start, interval=yf_interval, auto_adjust=False)
+    if period is not None:
+        df = ticker.history(period=period, interval=yf_interval, auto_adjust=False)
+    else:
+        df = ticker.history(start=start, interval=yf_interval, auto_adjust=False)
     return df
 
 
@@ -536,14 +554,21 @@ st.caption("資料來源：Yahoo Finance（yfinance）｜台股慣例：紅漲�
 # --- 上方：代碼、週期、跨度 ---
 c1, c2, c3 = st.columns([1.2, 1, 1])
 stock_code = c1.text_input("股票代碼", value="2330", help="台股輸入數字即可（例如 2330、6488），美股輸入英文代碼（例如 AAPL）")
-interval_name = c2.selectbox("週期", list(INTERVALS.keys()), index=0)
-period_name = c3.selectbox("資料跨度", list(PERIODS.keys()), index=3)
+# 先放「資料跨度」：選到 1 / 5 / 10 / 20 天時會自動改用分 K，這時「週期」選單就沒有作用，要變成灰色
+period_name = c3.selectbox("資料跨度", PERIOD_OPTIONS, index=PERIOD_OPTIONS.index("1 年"))
+short = period_name in SHORT_PERIODS
+interval_name = c2.selectbox("週期", list(INTERVALS.keys()), index=0, disabled=short,
+                             help="資料跨度選 1～20 天時，會自動改用分 K（像 Yahoo 的 1 日 / 5 日走勢）")
 interval = INTERVALS[interval_name]
 
 # --- 側邊欄：均線 ---
 with st.sidebar:
     # 護眼模式：打開後網頁和 K 線圖都換成深色
-    dark_mode = st.toggle("🌙 護眼模式（深色）", value=False)
+    st_version = tuple(int(x) for x in st.__version__.split(".")[:2])
+    # 半黑半白的圓形圖示：常見的「深淺色切換」符號，簡單不花俏
+    # 新版 Streamlit 可以用 Google Material 圖示；舊版不支援，就用文字符號 ◐
+    icon = ":material/contrast:" if st_version >= (1, 36) else "◐"
+    dark_mode = st.toggle(icon, value=False)   # 打開 = 護眼模式（深色）
     if dark_mode:
         st.markdown(DARK_CSS, unsafe_allow_html=True)
     st.divider()
@@ -564,17 +589,24 @@ if stock_code.strip() == "":
 # ---------------------------------------------------------------------
 # 決定要抓多少資料
 # ---------------------------------------------------------------------
-months = PERIODS[period_name]
 notice = None
-
-# 週線、月線跨度太短時自動拉長
-min_m = MIN_MONTHS.get(interval_name, 0)
-if months < min_m:
-    notice = f"{interval_name}選 {period_name} 只會有很少幾根 K 棒，已自動改為 {min_m // 12 if min_m >= 12 else min_m}{' 年' if min_m >= 12 else ' 個月'}。"
-    months = min_m
-# 顯示的起始日期 = 今天往前推 N 個月；實際抓的起始日期再往前多抓暖機資料
-show_start = pd.Timestamp.today().normalize() - pd.DateOffset(months=months)
-fetch_start = show_start - pd.Timedelta(days=WARMUP_DAYS[interval_name])
+if short:
+    # 短跨度：自動改用分 K
+    n_days, yf_interval, bar_label, fetch_period = SHORT_PERIODS[period_name]
+    fetch_kwargs = {"period": fetch_period}
+    notice = f"資料跨度 {period_name}：自動改用 {bar_label} 顯示（日 K 只有 {n_days} 根，看不出走勢）。"
+else:
+    months = PERIODS[period_name]
+    yf_interval, bar_label = interval["yf_interval"], interval_name
+    # 週線、月線跨度太短時自動拉長
+    min_m = MIN_MONTHS.get(interval_name, 0)
+    if months < min_m:
+        notice = f"{interval_name}選 {period_name} 只會有很少幾根 K 棒，已自動改為 {min_m // 12 if min_m >= 12 else min_m}{' 年' if min_m >= 12 else ' 個月'}。"
+        months = min_m
+    # 顯示的起始日期 = 今天往前推 N 個月；實際抓的起始日期再往前多抓暖機資料
+    show_start = pd.Timestamp.today().normalize() - pd.DateOffset(months=months)
+    fetch_start = show_start - pd.Timedelta(days=WARMUP_DAYS[interval_name])
+    fetch_kwargs = {"start": fetch_start.strftime("%Y-%m-%d")}
 
 # ---------------------------------------------------------------------
 # 抓資料（台股上市、上櫃都試，有資料就停）
@@ -586,7 +618,7 @@ for s in to_yahoo_symbols(stock_code):
     # 每次失敗先清掉快取（不然會一直拿到快取裡的空資料），再等一下重抓
     for attempt in range(3):
         try:
-            data = download_history(s, interval["yf_interval"], fetch_start.strftime("%Y-%m-%d"))
+            data = download_history(s, yf_interval, **fetch_kwargs)
         except Exception as e:
             data, last_error = None, e
         if data is not None and not data.empty:
@@ -613,8 +645,8 @@ df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 if df.index.tz is not None:
     df.index = df.index.tz_localize(None)
 
-# 週線、月線：用日線自己 resample
-if interval["resample"]:
+# 週線、月線：用日線自己 resample（分 K 不用）
+if not short and interval["resample"]:
     df = resample_ohlcv(df, interval["resample"])
 
 # ---------------------------------------------------------------------
@@ -626,8 +658,16 @@ df = add_kdj(df)
 df = add_bollinger(df)
 
 # 只顯示使用者選的跨度（前面多抓的暖機資料只用來算指標，不畫出來）
-show_df = df[df.index >= show_start]
-x_format = "%Y/%m" if interval_name == "月線" else "%Y/%m/%d"
+if short:
+    # 分 K：找出資料裡所有的交易日，取最後 N 個交易日
+    # （用「交易日」而不是「日曆天」，週末或連假時 1 天才會顯示最近一個有開盤的日子）
+    trade_days = sorted(set(df.index.date))
+    keep_days = trade_days[-n_days:]
+    show_df = df[df.index.date >= keep_days[0]]
+    x_format = "%H:%M" if n_days == 1 else "%m/%d %H:%M"
+else:
+    show_df = df[df.index >= show_start]
+    x_format = "%Y/%m" if interval_name == "月線" else "%Y/%m/%d"
 
 if len(show_df) < 2:
     st.warning("這個區間的資料太少，畫不出 K 線，請選擇較長的資料跨度。")
@@ -647,21 +687,27 @@ name = get_stock_name(symbol)
 st.subheader(f"{name}（{symbol}）")
 
 last = show_df.iloc[-1]
-prev = show_df.iloc[-2]
-change = last["Close"] - prev["Close"]
-pct = change / prev["Close"] * 100
+if short:
+    # 分 K 的漲跌要跟「前一個交易日的收盤價」比（跟看盤軟體一樣），不是跟前一根 5 分 K 比
+    before_today = df[df.index.date < show_df.index[-1].date()]
+    prev_close = before_today["Close"].iloc[-1] if len(before_today) else show_df["Open"].iloc[0]
+else:
+    prev_close = show_df["Close"].iloc[-2]
+change = last["Close"] - prev_close
+pct = change / prev_close * 100
 
 m1, m2, m3, m4, m5 = st.columns(5)
 # delta_color="inverse"：讓正數顯示紅色、負數顯示綠色，符合台股習慣
-m1.metric("收盤價", f"{last['Close']:,.2f}", f"{change:+,.2f} ({pct:+.2f}%)", delta_color="inverse")
+m1.metric("最新價" if short else "收盤價", f"{last['Close']:,.2f}", f"{change:+,.2f} ({pct:+.2f}%)",
+          delta_color="inverse", help="與前一交易日收盤價相比" if short else "與前一根 K 棒收盤價相比")
 m2.metric("區間最高", f"{show_df['High'].max():,.2f}")
 m3.metric("區間最低", f"{show_df['Low'].min():,.2f}")
-m4.metric(f"最新成交量（{vol_unit}）", f"{last['Volume']:,.0f}")
+m4.metric(f"{'最新一根' if short else '最新'}成交量（{vol_unit}）", f"{last['Volume']:,.0f}")
 m5.metric("K / D", f"{last['K']:.1f} / {last['D']:.1f}" if pd.notna(last["K"]) else "—")
 
-date_fmt = "%Y/%m/%d"
+date_fmt = "%Y/%m/%d %H:%M" if short else "%Y/%m/%d"
 st.caption(f"顯示範圍：{show_df.index[0].strftime(date_fmt)} ～ {show_df.index[-1].strftime(date_fmt)}，"
-           f"共 {len(show_df)} 根 {interval_name}")
+           f"共 {len(show_df)} 根 {bar_label}")
 
 # ---------------------------------------------------------------------
 # 用頁籤分開：圖表 / 新聞 / 資料表 / 指標說明，畫面才不會一次攤太多東西
@@ -740,7 +786,7 @@ with tab_data:
     cols = ["Open", "High", "Low", "Close", "Volume"] + [f"MA{n}" for n in MA_COLORS] + ["DIF", "DEA", "OSC", "K", "D", "J", "BB_UP", "BB_LOW"]
     table = show_df[cols].sort_index(ascending=False)
     table.index = table.index.strftime(date_fmt)
-    table.index.name = "日期"
+    table.index.name = "時間" if short else "日期"
     table = table.rename(columns={"Open": "開盤", "High": "最高", "Low": "最低", "Close": "收盤",
                                   "Volume": f"成交量({vol_unit})", "BB_UP": "布林上軌", "BB_LOW": "布林下軌"})
     if dark_mode:
@@ -750,7 +796,7 @@ with tab_data:
     else:
         st.dataframe(table.round(2), use_container_width=True, height=450)
     st.download_button("下載 CSV", table.round(4).to_csv().encode("utf-8-sig"),
-                       file_name=f"{symbol}_{interval['yf_interval']}.csv", mime="text/csv")
+                       file_name=f"{symbol}_{yf_interval}.csv", mime="text/csv")
 
 with tab_help:
     st.markdown(
