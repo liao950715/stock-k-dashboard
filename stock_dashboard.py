@@ -29,6 +29,12 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
+# 新聞情緒量化分析 V2.1（自己寫的模組）
+import ai_summary
+import news_pipeline as npl
+import news_sentiment as ns
+import news_store
+
 st.set_page_config(page_title="股票分析", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 # Streamlit 版本：有些參數（例如 vertical_alignment、Material 圖示）是新版才有，舊版要退回別的寫法
@@ -215,6 +221,9 @@ div[data-testid="stHorizontalBlock"]:has(.qk-pagenav) [role="radiogroup"] label 
 /* ---------- 新聞 ---------- */
 .qk-section { display: flex; justify-content: space-between; align-items: baseline; margin-top: 28px; }
 .qk-section-title { font-size: 16px; font-weight: 600; color: __text__; }
+/* 標題和右側小選單 / 按鈕放在同一排時：外距加在整排上，標題本身不再往下推，兩者才會對齊 */
+div[data-testid="stHorizontalBlock"]:has(.qk-section) { margin-top: 24px; align-items: center !important; }
+div[data-testid="stHorizontalBlock"] .qk-section { margin-top: 0; }
 .qk-section-title span { font-size: 13px; font-weight: 400; color: __muted__; margin-left: 8px; }
 .qk-news { max-width: 1080px; }
 .qk-item { display: flex; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid __border__; }
@@ -418,6 +427,8 @@ def fetch_material_info():
                 "code": str(row.get("公司代號") or row.get("SecuritiesCompanyCode") or "").strip(),
                 "date": roc_to_date(row.get("發言日期", "")),
                 "subject": str(row.get("主旨", "")).replace("\r\n", ""),
+                "date_raw": str(row.get("發言日期", "")).strip(),
+                "time_raw": str(row.get("發言時間", "")).strip(),
                 "detail": str(row.get("說明", "")),
             })
     return result
@@ -677,7 +688,8 @@ def draw_chart(df, show_ma, show_bb, show_vol, sub_ind, x_format, vol_unit, t):
 
 
 # ---------------------------------------------------------------------
-# 六、新聞的顯示用小工具（不改變偏多 / 偏空的判斷方式，只是把判斷依據也列出來）
+# 六、新聞情緒 V2.1：資料、計算與顯示用小工具
+#   計算本身都在 news_sentiment.py / news_pipeline.py，這裡只負責「接上資料來源」與「畫成 HTML」
 # ---------------------------------------------------------------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_news(query):
@@ -685,38 +697,108 @@ def get_news(query):
     return fetch_news(query), pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y/%m/%d %H:%M")
 
 
-def tone_reasons(title):
-    """列出標題裡出現的偏多 / 偏空關鍵字，當作展開新聞時的「判斷依據」"""
-    text = title.replace("漲跌", "").replace("止跌", "")
-    pos = [w for w in POSITIVE_WORDS if w in text]
-    neg = [w for w in NEGATIVE_WORDS if w in text]
-    return pos, neg
+@st.cache_resource(show_spinner=False)
+def get_store():
+    """SQLite 儲存（所有使用者共用同一個連線，寫入有鎖保護）"""
+    return news_store.NewsStore()
 
 
-TONE_CLASS = {"偏多": "qk-up", "偏空": "qk-down", "中性": "qk-flat"}
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_holidays():
+    """證交所休市日；抓不到時回傳空集合（未來日期就只用「週一到週五」判斷）"""
+    try:
+        return frozenset(npl.fetch_twse_holidays()), True
+    except Exception:
+        return frozenset(), False
 
 
-def news_row(n, with_detail=False):
-    """一則新聞的 HTML：左邊標題與來源時間，右邊小標籤；with_detail=True 時可以點開看判斷依據"""
+@st.cache_data(ttl=3600, show_spinner=False)
+def calendar_days(is_tw):
+    """交易日曆：用大盤指數（台股 ^TWII、美股 ^GSPC）最近半年的日 K 日期當作實際交易日"""
+    try:
+        idx = yf.Ticker("^TWII" if is_tw else "^GSPC").history(period="6mo", interval="1d").index
+        return [d.date() for d in idx]
+    except Exception:
+        return []
+
+
+def get_summarizer():
+    """AI 摘要：有 ANTHROPIC_API_KEY（Streamlit secrets 或環境變數）才啟用"""
+    key = None
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:
+        key = None
+    return ai_summary.AnthropicSummarizer(api_key=key)
+
+
+def news_analysis(symbol, code, name, is_tw, query):
+    """抓新聞 → 跑 V2.1 流程（存檔、分類、事件、NSI、快照），回傳畫面需要的所有東西"""
+    fetch_error = ""
+    try:
+        news_list, news_time = get_news(query)
+    except Exception as e:
+        news_list, news_time, fetch_error = None, "", str(e)
+    material = []
+    if is_tw:
+        try:
+            material = [a for a in fetch_material_info() if a["code"] == code]
+        except Exception:
+            material = []
+    holidays, _ = get_holidays() if is_tw else (frozenset(), False)
+    cal = npl.build_calendar(calendar_days(is_tw), is_tw, holidays)
+    names = [str(name)] + ([symbol] if not is_tw else [])
+    out = npl.run_analysis(get_store(), symbol, code, names, news_list, material, cal, fetch_error=fetch_error)
+    out.update({"news_list": news_list, "news_time": news_time, "calendar": cal, "fetch_error": fetch_error,
+                "material": material})
+    # news_id → 分類後的新聞、所屬事件、權重
+    out["item_by_id"] = {it.news_id: it for it in out["history_items"]}
+    out["event_by_news"] = {}
+    for row in out["result"]["rows"]:
+        for it in row["event"].items:
+            out["event_by_news"][it.news_id] = row
+    return out
+
+
+LABEL_CLASS = {"強烈偏多": "qk-up", "偏多": "qk-up", "中性": "qk-flat", "偏空": "qk-down", "強烈偏空": "qk-down"}
+ALERT_ICON = {"重大利多": "▲", "重大利空": "▼", "未確認重大消息": "?", "來源矛盾": "≠",
+              "已否認": "✕", "已更正或撤回": "↺", "多空高度分歧": "⇅"}
+
+
+def news_row(n, info, with_detail=False):
+    """
+    一則新聞的 HTML：左邊標題與來源時間，右邊小標籤（五級情緒）。
+    with_detail=True 時可以點開看：判斷依據、事件類型、重要性、相關性、確認狀態、權重、原文連結。
+    """
+    nid = ns.make_news_id(n.get("link", ""), n.get("source", ""), n["title"])
+    it = info["item_by_id"].get(nid)
+    row = info["event_by_news"].get(nid)
+    label = it.label if it else "中性"
     title = html.escape(n["title"])
     link = html.escape(n["link"], quote=True)
     when = n["published"].strftime("%Y/%m/%d %H:%M") if n["published"] is not None else ""
     meta = f'{html.escape(n["source"])}　{when}'
-    tag = f'<span class="qk-tag {TONE_CLASS[n["tone"]]}">{n["tone"]}</span>'
+    tag = f'<span class="qk-tag {LABEL_CLASS[label]}">{label}</span>'
     if not with_detail:
         return (f'<div class="qk-item"><div><a href="{link}" target="_blank">{title}</a>'
                 f'<div class="qk-item-meta">{meta}</div></div>{tag}</div>')
-    pos, neg = tone_reasons(n["title"])
-    reason = []
-    if pos:
-        reason.append("偏多關鍵字：" + "、".join(pos))
-    if neg:
-        reason.append("偏空關鍵字：" + "、".join(neg))
-    reason_text = "；".join(reason) if reason else "標題沒有出現偏多或偏空關鍵字，所以判斷為中性"
+    lines = []
+    if it:
+        lines.append(f"判斷依據：{html.escape(it.reason)}")
+        lines.append(f"事件類型：{html.escape(it.event_type)}（重要性等級 {it.importance}）　·　個股相關性 R = {it.relevance:.2f}")
+    if row:
+        ev = row["event"]
+        same = f"，同一事件共 {len(ev.items)} 篇報導" if len(ev.items) > 1 else ""
+        lines.append(f"事件 {ev.event_id}（第 {ev.version} 版）　·　確認狀態：{html.escape(ev.status)}{same}")
+        if row["eligible"]:
+            lines.append(f"納入 NSI：權重 W = {row.get('W', 0):.2f}"
+                         f"（I {row['I']} × R′ {row['R_prime']} × T {row['T']:.2f} × U {row['U']:.0f}，經過 {row['t']} 個交易日）")
+        else:
+            lines.append(f"未納入 NSI：{html.escape(row['excluded_reason'])}")
+    lines.append(f'<a href="{link}" target="_blank">開啟原文 ↗</a>')
     return (f'<details class="qk-detail"><summary><div class="qk-item"><div><div class="qk-item-title">{title}</div>'
             f'<div class="qk-item-meta">{meta}</div></div>{tag}</div></summary>'
-            f'<div class="qk-detail-body">判斷依據：{html.escape(reason_text)}<br>'
-            f'<a href="{link}" target="_blank">開啟原文 ↗</a></div></details>')
+            f'<div class="qk-detail-body">{"<br>".join(lines)}</div></details>')
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -972,12 +1054,10 @@ if page == "走勢圖":
     nh1.markdown('<div class="qk-section"><div class="qk-section-title">相關新聞</div></div>', unsafe_allow_html=True)
     btn_kwargs = {"type": "tertiary"} if ST_VERSION >= (1, 42) else {}
     nh2.button("查看全部 →", on_click=go_to_news, **btn_kwargs)
-    try:
-        news_list, _ = get_news(news_query)
-    except Exception:
-        news_list = None
+    info = news_analysis(symbol, code, name, is_tw, news_query)   # 同時更新 V2.1 快照（計算很輕）
+    news_list = info["news_list"]
     if news_list:
-        st.markdown('<div class="qk-news">' + "".join(news_row(n) for n in news_list[:5]) + "</div>",
+        st.markdown('<div class="qk-news">' + "".join(news_row(n, info) for n in news_list[:5]) + "</div>",
                     unsafe_allow_html=True)
     elif news_list is None:
         st.caption("新聞暫時抓不到，請稍後再試。")
@@ -985,94 +1065,186 @@ if page == "走勢圖":
         st.caption("找不到這檔股票的相關新聞。")
 
 # =====================================================================
-# 分頁 2：相關新聞（新聞分析）
+# 分頁 2：相關新聞（新聞情緒量化分析 V2.1）
 # =====================================================================
 elif page == "相關新聞":
-    try:
-        news_list, news_time = get_news(news_query)
-    except Exception as e:
-        news_list, news_time = None, ""
-        st.warning(f"新聞暫時抓不到，請稍後再試。（{e}）")
+    info = news_analysis(symbol, code, name, is_tw, news_query)
+    res, stats, mom = info["result"], info["result"]["stats"], info["momentum"]
+    counts = info["counts"]
+    news_list = info["news_list"]
+    if news_list is None:
+        st.warning(f"新聞來源暫時查詢失敗，以下只用先前已儲存的新聞計算。（{info['fetch_error'][:120]}）")
 
     # --- 今日公司重大訊息（只有台股，而且 API 只提供當天公告） ---
-    if is_tw:
-        try:
-            announcements = [a for a in fetch_material_info() if a["code"] == code]
-        except Exception:
-            announcements = []
-        for a in announcements:
-            with st.expander(f"📢 今日重大訊息｜{a['date']}｜{a['subject'][:60]}"):
-                st.text(a["detail"])
+    for a in info["material"]:
+        with st.expander(f"📢 今日重大訊息｜{a['date']}｜{a['subject'][:60]}"):
+            st.text(a["detail"])
 
-    if news_list is not None and len(news_list) == 0:
-        st.info("找不到這檔股票的相關新聞。")
-    elif news_list:
-        total = len(news_list)
-        cnt = {t_: sum(1 for n in news_list if n["tone"] == t_) for t_ in ["偏多", "中性", "偏空"]}
-        # 淨情緒分數 =（偏多則數 − 偏空則數）÷ 總則數 × 100，範圍 −100 ～ +100
-        # 只是把現有的「偏多 / 偏空」分類做統計，沒有新增新的情緒判斷公式
-        score = (cnt["偏多"] - cnt["偏空"]) / total * 100
-        overall = "偏多" if score > 20 else ("偏空" if score < -20 else "中性")
-        score_cls = TONE_CLASS[overall]
-        # 近期變化：比較「較新的一半」與「較舊的一半」新聞的淨分數（只是這批新聞內的比較，不是長期趨勢）
-        half = total // 2
-        newer, older = news_list[:half], news_list[half:]
-        def net(items):
-            return (sum(1 for n in items if n["tone"] == "偏多") - sum(1 for n in items if n["tone"] == "偏空")) / len(items) * 100 if items else 0
-        delta = net(newer) - net(older) if half else 0
-        delta_txt = f"{'▲' if delta > 0 else ('▼' if delta < 0 else '')} {delta:+.0f}"
-        ratio = f"{cnt['偏多'] / cnt['偏空']:.1f}" if cnt["偏空"] else "—"
+    # ================= A. 新聞情緒總覽 =================
+    shown_label = info["display_label"]
+    if stats["valid"]:
+        nsi_txt = f"{stats['nsi']:+.0f}"
+        cls = LABEL_CLASS.get(shown_label, "qk-flat")
+    else:
+        nsi_txt, cls, shown_label = "—", "qk-flat", "無有效事件"
+    mom_txt = (f"{'▲' if mom['value'] > 0 else ('▼' if mom['value'] < 0 else '')} {mom['value']:+.0f}　{mom['label']}"
+               if mom["value"] is not None else mom["label"])
+    a_txt = f"{stats['A']:.2f}" if stats["A"] is not None else "—"
+    o_txt = ("無明顯方向性新聞" if stats["valid"] and stats["no_direction"]
+             else (f"{stats['omega']:.2f}" if stats["omega"] is not None else "—"))
+    st.markdown(
+        f'<div class="qk-news"><div class="qk-section"><div class="qk-section-title">新聞情緒總覽</div>'
+        f'<div class="qk-note">資料更新 {info["news_time"] or "—"}　·　分析截點 {pd.Timestamp(info["data_cutoff"]).tz_convert("Asia/Taipei").strftime("%m/%d %H:%M")}</div></div>'
+        f'<div class="qk-overview">'
+        f'<div class="qk-ov"><label>新聞情緒指數 NSI（−100 ～ +100）</label><span class="qk-score {cls}">{nsi_txt}</span></div>'
+        f'<div class="qk-ov"><label>情緒方向</label><b class="{cls}">{shown_label}</b></div>'
+        f'<div class="qk-ov"><label>5 日情緒動能</label><b>{mom_txt}</b></div>'
+        f'<div class="qk-ov"><label>分析穩健程度</label><b>{res["robustness"]}</b></div>'
+        f'<div class="qk-ov"><label>新聞 / 獨立事件</label><b>{counts["N_raw"]} 則 / {counts["K_events"]} 個</b></div>'
+        f'</div>'
+        f'<div class="qk-bar-legend" style="margin-top:14px">'
+        f'<span>相關新聞 {counts["N_rel"]} 則</span><span>納入計算 {counts["K_incl"]} 個事件</span>'
+        f'<span>等效事件數 n_eff {counts["n_eff"]:.1f}</span><span>平均情緒強度 A {a_txt}</span>'
+        f'<span>情緒抵銷率 Ω {o_txt}</span></div>'
+        f'<div class="qk-note" style="margin-top:6px">NSI 是新聞情緒的收縮加權平均，用來描述新聞面，不代表股價預測。'
+        f'{"　" + "；".join(res["notes"]) if res["notes"] else ""}</div></div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("計算細節：敏感度分析與權重"):
+        sens_rows = [{"設定": k, "NSI": None if v["nsi"] is None else round(v["nsi"], 1), "標籤": v["label"] or "—"}
+                     for k, v in res["sensitivity"].items()]
+        st.dataframe(pd.DataFrame(sens_rows), hide_index=True, use_container_width=True)
+        cap_txt = ("未觸發" if not res["capped"] else f"已觸發（調整前後 NSI 差 {res['nsi_cap_diff']:+.1f}）")
+        st.caption(f"敏感度結果{'一致' if res['sensitivity_consistent'] else '不一致'}　·　"
+                   f"最大單一事件權重占比 {res['max_share'] * 100:.0f}%　·　40% 集中度上限：{cap_txt}"
+                   if res["max_share"] is not None else "沒有可計算的事件")
+        st.caption(f"公式 {ns.FORMULA_VERSION}　·　參數 {ns.PARAMS_VERSION}　·　分類 {ns.CLASSIFIER_MODEL} {ns.CLASSIFIER_VERSION}"
+                   f"（規則式關鍵字判斷，未經準確率驗證）")
 
-        # --- 新聞分析總覽 ---
+    # ================= B. 情緒趨勢 =================
+    tr1, tr2, _ = st.columns([3, 1.2, 1.2], **({"vertical_alignment": "bottom"} if ST_VERSION >= (1, 36) else {}))
+    tr1.markdown('<div class="qk-section"><div class="qk-section-title">情緒趨勢</div></div>', unsafe_allow_html=True)
+    trend_days = tr2.selectbox("趨勢區間", [7, 30], key="trend_days", label_visibility="collapsed",
+                               format_func=lambda v: f"近 {v} 個交易日")
+    series = npl.trend_series(get_store(), symbol, info["calendar"], info["session"], trend_days)
+    ok_pts = [p for p in series if p["status"] == "ok"]
+    n_failed = sum(1 for p in series if p["status"] == "failed")
+    n_missing = sum(1 for p in series if p["status"] == "not_collected")
+    if len(ok_pts) >= 2:
+        tfig = go.Figure(go.Scatter(
+            x=[p["date"].strftime("%m/%d") for p in ok_pts], y=[p["nsi"] for p in ok_pts], mode="lines+markers",
+            line=dict(color=theme["accent"], width=2), marker=dict(size=6),
+            customdata=[p["robustness"] for p in ok_pts],
+            hovertemplate="%{x}　NSI %{y:+.0f}<br>穩健程度 %{customdata}<extra></extra>"))
+        tfig.add_hline(y=0, line_color=theme["border"], line_width=1)
+        tfig.update_layout(height=240, paper_bgcolor=theme["chart"], plot_bgcolor=theme["chart"],
+                           margin=dict(l=12, r=12, t=12, b=8), showlegend=False,
+                           font=dict(color=theme["muted"], size=12),
+                           hoverlabel=dict(bgcolor=theme["toolbar"], font=dict(color=theme["text"])))
+        tfig.update_xaxes(type="category", showgrid=False, linecolor=theme["border"])
+        tfig.update_yaxes(range=[-100, 100], gridcolor=theme["grid"], zeroline=False, side="right")
+        st.plotly_chart(tfig, use_container_width=True, theme=None, config={"displayModeBar": False})
+        st.caption(f"有效快照 {len(ok_pts)} 天　·　查詢失敗 {n_failed} 天　·　未蒐集 {n_missing} 天（不以 0 分補值）")
+    else:
         st.markdown(
-            f'<div class="qk-news"><div class="qk-section"><div class="qk-section-title">新聞分析總覽</div>'
-            f'<div class="qk-note">資料更新 {news_time}</div></div>'
-            f'<div class="qk-overview">'
-            f'<div class="qk-ov"><label>淨情緒分數（−100 ～ +100）</label><span class="qk-score {score_cls}">{score:+.0f}</span></div>'
-            f'<div class="qk-ov"><label>整體判斷</label><b class="{score_cls}">{overall}</b></div>'
-            f'<div class="qk-ov"><label>近期變化（較新 {half} 則 vs 較舊 {total - half} 則）</label><b>{delta_txt}</b></div>'
-            f'<div class="qk-ov"><label>多空比</label><b>{ratio}</b></div>'
-            f'<div class="qk-ov"><label>已分析新聞</label><b>{total} 則</b></div>'
-            f'</div>'
-            f'<div class="qk-bar">'
-            f'<div style="width:{cnt["偏多"] / total * 100:.1f}%; background:{theme["up"]}"></div>'
-            f'<div style="width:{cnt["中性"] / total * 100:.1f}%; background:{theme["muted"]}"></div>'
-            f'<div style="width:{cnt["偏空"] / total * 100:.1f}%; background:{theme["down"]}"></div></div>'
-            f'<div class="qk-bar-legend"><span class="qk-up">偏多 {cnt["偏多"] / total * 100:.0f}%（{cnt["偏多"]} 則）</span>'
-            f'<span>中性 {cnt["中性"] / total * 100:.0f}%（{cnt["中性"]} 則）</span>'
-            f'<span class="qk-down">偏空 {cnt["偏空"] / total * 100:.0f}%（{cnt["偏空"]} 則）</span></div>'
-            f'<div class="qk-note" style="margin-top:6px">偏多 / 偏空以標題關鍵字判斷，淨情緒分數 = (偏多 − 偏空) ÷ 總則數 × 100；'
-            f'+20 以上視為偏多、−20 以下視為偏空，僅供快速瀏覽。</div>'
+            f'<div class="qk-empty">趨勢資料不足（近 {trend_days} 個交易日只有 {len(ok_pts)} 天有效快照）<br>'
+            f'系統從開始使用後，每個交易日打開這頁時會記錄一次 NSI 快照；至少要有 2 天才會畫出趨勢。'
+            f'查詢失敗 {n_failed} 天、未蒐集 {n_missing} 天不會被當成 0 分。</div>',
+            unsafe_allow_html=True)
 
-            # --- 情緒趨勢圖：目前沒有歷史資料，顯示空狀態（不拿這 20 則新聞假裝成長期趨勢） ---
-            f'<div class="qk-section"><div class="qk-section-title">情緒趨勢</div></div>'
-            f'<div class="qk-empty" style="margin-top:12px">尚無歷史情緒資料<br>'
-            f'目前只有最新 {total} 則新聞的即時分析；需要每天記錄情緒分數後，才能畫出 7 日 / 30 日的趨勢。（規劃中）</div>'
+    # ================= C. 重大事件與多空分歧 =================
+    alerts = info["alerts"]
+    st.markdown('<div class="qk-section"><div class="qk-section-title">重大事件與多空分歧'
+                f'<span>{len(alerts)} 項</span></div></div>', unsafe_allow_html=True)
+    if alerts:
+        rows_html = []
+        for a in alerts:
+            kind_cls = ("qk-up" if a["kind"] == "重大利多" else ("qk-down" if a["kind"] == "重大利空" else "qk-flat"))
+            when = a.get("updated_at").astimezone().strftime("%m/%d %H:%M") if a.get("updated_at") else ""
+            src = "、".join(a.get("sources", [])[:3])
+            sub = "　·　".join(x for x in [a.get("status", ""), src, when] if x)
+            rows_html.append(
+                f'<div class="qk-item"><div><div class="qk-item-title">{ALERT_ICON.get(a["kind"], "")} {html.escape(a["title"])}</div>'
+                f'<div class="qk-item-meta">{html.escape(sub)}</div>'
+                f'<div class="qk-item-meta">{html.escape(a.get("reason", ""))}</div></div>'
+                f'<span class="qk-tag {kind_cls}">{a["kind"]}</span></div>')
+        st.markdown('<div class="qk-news">' + "".join(rows_html) + "</div>", unsafe_allow_html=True)
+        st.caption("「未確認重大消息」是傳聞，尚未被證實，不代表已經發生；已否認、已更正的事件不再以原方向計分。")
+    else:
+        st.caption("目前沒有重大利多、重大利空、未確認消息或高度分歧的情況。")
 
-            # --- AI 分析摘要：目前沒有 AI 摘要功能，只顯示空狀態 ---
-            f'<div class="qk-section"><div class="qk-section-title">AI 分析摘要</div>'
-            f'<div class="qk-note">生成時間：—</div></div>'
-            f'<div class="qk-panel" style="margin-top:12px"><div class="qk-note">'
-            f'尚未產生 AI 摘要。這個區塊預留給下一階段的「整體情緒」與「重要觀察」自動摘要，目前不會顯示任何 AI 生成內容。'
-            f'</div></div></div>',
-            unsafe_allow_html=True,
-        )
-        st.button("重新分析（下一階段開放）", disabled=True)
+    # ================= D. AI 分析摘要 =================
+    summarizer = get_summarizer()
+    inp = ns.summary_input(symbol, str(name), res, mom, alerts, info["display_label"])
+    rule_sum = ns.rule_based_summary(res, mom, alerts)
+    force = st.session_state.pop(f"force_summary_{symbol}", False)
+    summary = ai_summary.get_summary(get_store(), summarizer, symbol, inp, info["event_version_set"],
+                                     info["snapshot_id"], info["data_cutoff"], rule_sum, force=force)
+    kind_txt = {"ai": f"AI 生成（{summarizer.model}）", "ai_stale": "AI 摘要（已過期，最新一次更新失敗）",
+                "rule": "規則式摘要（非 AI 生成）"}[summary["kind"]]
+    gen_at = pd.Timestamp(summary["generated_at"]).tz_convert("Asia/Taipei").strftime("%m/%d %H:%M")
+    cut_at = pd.Timestamp(summary["data_cutoff"]).tz_convert("Asia/Taipei").strftime("%m/%d %H:%M")
+    s1, s2, _ = st.columns([5.6, 1.1, 1.9], **col_kwargs)   # 按鈕對齊在摘要區（約 1080px）右上角
+    s1.markdown(f'<div class="qk-section"><div class="qk-section-title">AI 分析摘要<span>{kind_txt}</span></div>'
+                f'<div class="qk-note">更新 {gen_at}　·　資料截點 {cut_at}</div></div>', unsafe_allow_html=True)
 
-        # --- 新聞明細：左邊標題 + 則數，右邊小型篩選選單 ---
-        bottom = {"vertical_alignment": "bottom"} if ST_VERSION >= (1, 36) else {}
-        d1, d2, _ = st.columns([3, 1.2, 1.2], **bottom)   # 篩選選單跟「新聞明細」標題底部對齊
-        shown = [n for n in news_list if st.session_state.news_filter == "全部新聞" or n["tone"] == st.session_state.news_filter]
+    def request_reanalysis(tk=symbol):
+        ok_, wait = ai_summary.manual_allowed(get_store(), tk, st.session_state.get(f"manual_at_{tk}"))
+        if ok_:
+            st.session_state[f"force_summary_{tk}"] = True
+            st.session_state[f"manual_at_{tk}"] = pd.Timestamp.now(tz="UTC").to_pydatetime()
+            get_store().record_manual_run(tk)
+        else:
+            st.session_state[f"cooldown_msg_{tk}"] = f"請等 {wait} 秒後再重新分析"
+
+    s2.button("重新分析", on_click=request_reanalysis, disabled=not summarizer.available,
+              help=None if summarizer.available else f"AI 摘要未啟用：{summarizer.reason}")
+    msg = st.session_state.pop(f"cooldown_msg_{symbol}", None)
+    if msg:
+        st.caption("ⓘ " + msg)
+    c = summary["content"]
+
+    def bullet(items):
+        out = []
+        for x in items or []:
+            txt = x["text"] if isinstance(x, dict) else x
+            out.append(f"<li>{html.escape(str(txt))}</li>")
+        return "<ul style='margin:4px 0 0 18px'>" + "".join(out) + "</ul>" if out else "<div class='qk-note'>無</div>"
+
+    st.markdown(
+        f'<div class="qk-news qk-panel" style="font-size:14px; line-height:1.8">'
+        f'<b>整體情緒</b><div>{html.escape(c.get("overall", ""))}</div>'
+        f'<b>情緒變化</b><div>{html.escape(c.get("change", ""))}</div>'
+        f'<b>正面因素</b>{bullet(c.get("positives"))}'
+        f'<b>負面因素</b>{bullet(c.get("negatives"))}'
+        f'<b>重大風險</b>{bullet(c.get("risks"))}'
+        f'<b>分析限制</b>{bullet(c.get("limitations"))}</div>',
+        unsafe_allow_html=True)
+    if summary["kind"] != "ai":
+        st.caption("ⓘ " + ("AI 摘要功能未啟用（" + summary["error"] + "），目前顯示依數據自動組成的規則式摘要。"
+                           if summary["kind"] == "rule" else f"AI 摘要更新失敗：{summary['error'][:120]}"))
+
+    # ================= E. 新聞明細 =================
+    if news_list:
+        d1, d2, _ = st.columns([3, 1.2, 1.2], **({"vertical_alignment": "bottom"} if ST_VERSION >= (1, 36) else {}))
+        def label_of(n):
+            it = info["item_by_id"].get(ns.make_news_id(n.get("link", ""), n.get("source", ""), n["title"]))
+            return it.label if it else "中性"
+        f = st.session_state.news_filter
+        shown = [n for n in news_list if f == "全部新聞" or label_of(n) == f]
         d1.markdown(f'<div class="qk-section"><div class="qk-section-title">新聞明細<span>{len(shown)} 則</span></div></div>',
                     unsafe_allow_html=True)
-        d2.selectbox("篩選", ["全部新聞", "偏多", "中性", "偏空"], key="news_filter", label_visibility="collapsed",
-                     format_func=lambda v: f"篩選：{v}")
+        d2.selectbox("篩選", ["全部新聞", "強烈偏多", "偏多", "中性", "偏空", "強烈偏空"], key="news_filter",
+                     label_visibility="collapsed", format_func=lambda v: f"篩選：{v}")
         if shown:
-            st.markdown('<div class="qk-news">' + "".join(news_row(n, with_detail=True) for n in shown) + "</div>",
+            st.markdown('<div class="qk-news">' + "".join(news_row(n, info, with_detail=True) for n in shown) + "</div>",
                         unsafe_allow_html=True)
         else:
             st.caption("這個分類目前沒有新聞。")
-        st.caption("新聞來源：Google 新聞 RSS 搜尋結果；點新聞可展開判斷依據與原文連結。")
+        st.caption("新聞來源：Google 新聞 RSS 搜尋結果；點新聞可展開判斷依據、事件類型、確認狀態與權重。"
+                   "畫面顯示最新 20 則，計算則使用系統保存的所有相關新聞。")
+    elif news_list is not None:
+        st.info("找不到這檔股票的相關新聞。")
 
 # =====================================================================
 # 分頁 3：歷史資料
