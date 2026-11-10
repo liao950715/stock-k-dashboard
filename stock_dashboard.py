@@ -571,6 +571,15 @@ def add_kdj(df, n=9):
     df["K"] = k_list
     df["D"] = d_list
     df["J"] = 3 * df["K"] - 2 * df["D"]
+    rsv.iloc[: n - 1] = np.nan             # 前 8 根算不出 RSV，畫圖時不顯示
+    df["RSV"] = rsv
+
+    # 交叉訊號：
+    #   黃金交叉：前一根 K < D，這一根 K >= D（K 由下往上穿過 D，偏多訊號）
+    #   死亡交叉：前一根 K > D，這一根 K <= D（K 由上往下穿過 D，偏空訊號）
+    k_prev_s, d_prev_s = df["K"].shift(1), df["D"].shift(1)
+    df["KD_GOLDEN"] = (k_prev_s < d_prev_s) & (df["K"] >= df["D"])
+    df["KD_DEATH"] = (k_prev_s > d_prev_s) & (df["K"] <= df["D"])
     return df
 
 
@@ -664,6 +673,16 @@ def draw_chart(df, show_ma, show_bb, show_vol, sub_ind, x_format, vol_unit, t):
         fig.add_trace(go.Scatter(x=x, y=df["K"], mode="lines", name="K", line=dict(color=MA_COLORS[5], width=1.2)), row=r, col=1)
         fig.add_trace(go.Scatter(x=x, y=df["D"], mode="lines", name="D", line=dict(color=MA_COLORS[20], width=1.2)), row=r, col=1)
         fig.add_trace(go.Scatter(x=x, y=df["J"], mode="lines", name="J", line=dict(color=MA_COLORS[120], width=1)), row=r, col=1)
+        # RSV：K 值平滑之前的原始值，用細虛線，避免跟 K、D 搶視線
+        fig.add_trace(go.Scatter(x=x, y=df["RSV"], mode="lines", name="RSV",
+                                 line=dict(color=t["muted"], width=1, dash="dot")), row=r, col=1)
+        # 黃金交叉（▲，紅色）與死亡交叉（▼，綠色），標在交叉當根的 D 值上
+        for col, label, symbol, color in (("KD_GOLDEN", "黃金交叉", "triangle-up", up),
+                                          ("KD_DEATH", "死亡交叉", "triangle-down", down)):
+            hit = df[col].fillna(False).to_numpy(dtype=bool)
+            fig.add_trace(go.Scatter(x=x[hit], y=df["D"][hit], mode="markers", name=label,
+                                     marker=dict(symbol=symbol, size=9, color=color,
+                                                 line=dict(width=1, color=t["chart"]))), row=r, col=1)
         fig.add_hline(y=80, line_dash="dot", line_color=up, line_width=1, row=r, col=1)
         fig.add_hline(y=20, line_dash="dot", line_color=down, line_width=1, row=r, col=1)
         fig.update_yaxes(title_text="KDJ", row=r, col=1)
@@ -677,10 +696,11 @@ def draw_chart(df, show_ma, show_bb, show_vol, sub_ind, x_format, vol_unit, t):
         hoverlabel=dict(bgcolor=t["toolbar"], bordercolor=t["border"], font=dict(color=t["text"])),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, font=dict(size=11, color=t["muted"]),
                     bgcolor="rgba(0,0,0,0)"),
-        margin=dict(l=12, r=12, t=36, b=8),
+        # 下方留 36px 給最底下那張圖的日期刻度，否則開副圖時日期會被切掉
+        margin=dict(l=12, r=12, t=36, b=36),
         dragmode="zoom",
     )
-    fig.update_xaxes(type="category", nticks=10, showgrid=False, linecolor=t["border"],
+    fig.update_xaxes(type="category", nticks=10, showgrid=False, linecolor=t["border"], automargin=True,
                      showspikes=True, spikemode="across", spikethickness=1, spikecolor=t["muted"], spikedash="dot")
     # automargin：讓右側的價格刻度自動保留空間，數字才不會被切掉
     fig.update_yaxes(gridcolor=t["grid"], zeroline=False, linecolor=t["border"], side="right", automargin=True)
@@ -1291,6 +1311,8 @@ else:
 
 **KDJ (9, 3, 3)**：RSV = (收盤 − 9 根最低) ÷ (9 根最高 − 9 根最低) × 100；
 K = 2/3 × 前 K + 1/3 × RSV；D = 2/3 × 前 D + 1/3 × K；J = 3K − 2D。K、D 初始值為 50。
+副圖中 RSV 以灰色虛線顯示；▲ 黃金交叉 = K 由下往上穿過 D（偏多），▼ 死亡交叉 = K 由上往下穿過 D（偏空）。
+交叉只代表短線動能轉向，盤整時容易反覆出現，建議搭配 K 值高低（80 以上 / 20 以下）一起看。
 
 **布林通道 (20, 2)**：中軌 = MA20；上軌 / 下軌 = 中軌 ± 2 × 最近 20 根收盤價的標準差（母體標準差）。
 
