@@ -1226,8 +1226,13 @@ elif page == "相關新聞":
         f'<b>分析限制</b>{bullet(c.get("limitations"))}</div>',
         unsafe_allow_html=True)
     if summary["kind"] != "ai":
-        st.caption("ⓘ " + ("AI 摘要功能未啟用（" + summary["error"] + "），目前顯示依數據自動組成的規則式摘要。"
-                           if summary["kind"] == "rule" else f"AI 摘要更新失敗：{summary['error'][:120]}"))
+        if not summarizer.available:
+            note = f"AI 摘要功能未啟用（{summary['error']}），目前顯示依數據自動組成的規則式摘要。"
+        elif summary["kind"] == "rule":
+            note = f"AI 摘要這次沒有產生成功：{summary['error'][:160]}。目前改顯示規則式摘要。"
+        else:
+            note = f"AI 摘要更新失敗，顯示的是上一次的摘要：{summary['error'][:160]}"
+        st.caption("ⓘ " + note)
 
     # ================= E. 新聞明細 =================
     if news_list:

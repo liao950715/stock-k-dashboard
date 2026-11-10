@@ -37,6 +37,14 @@ def store():
     return news_store.NewsStore(":memory:")
 
 
+@pytest.fixture(autouse=True)
+def _reset_failure_memory():
+    """失敗冷卻記在模組層級，每個測試前後都清空，避免測試互相影響"""
+    ai_summary._failures.clear()
+    yield
+    ai_summary._failures.clear()
+
+
 def _analysis(calendar, extra=()):
     items = [make_item("台積電月營收創新高", published=tpe(2026, 11, 10, 9, 30)),
              make_item("台積電法說會上修財測", source="B 報", published=tpe(2026, 11, 10, 10))] + list(extra)
@@ -298,3 +306,33 @@ def test_openrouter_real_endpoint_rejects_fake_key():
     p = ai_summary.OpenRouterSummarizer("sk-or-v1-this-is-not-a-real-key")
     with pytest.raises(RuntimeError, match="401|金鑰無效"):
         p.generate({"nsi": 0, "events": [], "alerts": []})
+
+
+def test_failure_backoff_prevents_repeated_api_calls(store, calendar):
+    _, _, _, inp, events = _analysis(calendar)
+    ai_summary._failures.clear()
+    p = FakeProvider(fail=True)
+    now = datetime(2026, 11, 10, 4, tzinfo=timezone.utc)
+    _get(store, p, inp, events, now=now)
+    for _ in range(5):                                        # 重新整理 5 次
+        out = _get(store, p, inp, events, now=now + timedelta(minutes=5))
+    assert p.calls == 1 and "不自動重試" in out["error"]
+    _get(store, p, inp, events, now=now + timedelta(minutes=31))   # 冷卻結束才再試
+    assert p.calls == 2
+    _get(store, p, inp, events, force=True, now=now + timedelta(minutes=32))   # 手動重新分析不受限制
+    assert p.calls == 3
+    ai_summary._failures.clear()
+
+
+def test_validation_accepts_numbers_from_input_and_event_ids():
+    inp = {"nsi": 41, "momentum": None, "K_incl": 21, "n_eff": 13.5, "A": 0.42, "omega": 0.0,
+           "events": [{"event_id": "ev-ab0226cd", "title": "台積電10月營收5,868億元", "score": 0.5,
+                       "importance": 3, "status": "單一來源", "sources": []}],
+           "alerts": [], "notes": []}
+    good = {"overall": "NSI 為 +41，事件分數 0.50，營收 5,868 億元", "change": "",
+            "positives": [{"text": "營收創新高（ev-ab0226cd）", "event_ids": ["ev-ab0226cd"]}],
+            "negatives": [], "risks": [], "limitations": []}
+    assert ns.validate_ai_output(good, inp)[0]
+    bad = dict(good, overall="NSI 為 +87")
+    ok, problems = ns.validate_ai_output(bad, inp)
+    assert not ok and "87" in problems[0]

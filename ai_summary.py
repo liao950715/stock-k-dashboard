@@ -28,6 +28,10 @@ MANUAL_COOLDOWN = timedelta(seconds=60)
 
 _locks: dict = {}
 _locks_guard = threading.Lock()
+# 失敗冷卻：同一檔股票、同一份資料（指紋）產生失敗後，30 分鐘內不自動重試，
+# 避免每次重新整理頁面都去呼叫 API、一直花錢；手動「重新分析」不受影響
+FAILURE_BACKOFF = timedelta(minutes=30)
+_failures: dict = {}
 
 
 def _lock_for(key: str) -> threading.Lock:
@@ -229,6 +233,17 @@ def get_summary(store, provider, ticker: str, inp: dict, evset: str, snapshot_id
         return {"kind": "ai", "content": cached["content"], "generated_at": cached["generated_at"],
                 "data_cutoff": cached["data_cutoff"], "error": "", "refreshed": False}
 
+    fail_key = (ticker, provider.model_version, fp)
+    last_fail = _failures.get(fail_key)
+    if not force and last_fail and now - last_fail[0] < FAILURE_BACKOFF:
+        wait = int((FAILURE_BACKOFF - (now - last_fail[0])).total_seconds() // 60) + 1
+        err = f"{last_fail[1]}（{wait} 分鐘內不自動重試，可按「重新分析」）"
+        if cached:
+            return {"kind": "ai_stale", "content": cached["content"], "generated_at": cached["generated_at"],
+                    "data_cutoff": cached["data_cutoff"], "error": err, "refreshed": False}
+        return {"kind": "rule", "content": rule_summary, "generated_at": now.isoformat(),
+                "data_cutoff": data_cutoff, "error": err, "refreshed": False}
+
     lock = _lock_for(ticker)
     if not lock.acquire(blocking=False):
         # 另一個請求正在生成同一檔股票的摘要：先顯示快取，不重複呼叫
@@ -248,6 +263,7 @@ def get_summary(store, provider, ticker: str, inp: dict, evset: str, snapshot_id
             if not ok:
                 raise ValueError("AI 輸出未通過驗證：" + "；".join(problems[:3]))
         except Exception as e:  # API 失敗、拒絕、驗證不通過 → 不偽造結果
+            _failures[fail_key] = (now, str(e)[:200])
             if cached:
                 return {"kind": "ai_stale", "content": cached["content"], "generated_at": cached["generated_at"],
                         "data_cutoff": cached["data_cutoff"], "error": str(e), "refreshed": True}
@@ -259,6 +275,7 @@ def get_summary(store, provider, ticker: str, inp: dict, evset: str, snapshot_id
                "fingerprint": fp, "generated_at": now.isoformat(), "data_cutoff": data_cutoff,
                "source_event_ids": [e["event_id"] for e in inp["events"]], "content": out}
         store.save_summary(rec)
+        _failures.pop(fail_key, None)
         return {"kind": "ai", "content": out, "generated_at": rec["generated_at"], "data_cutoff": data_cutoff,
                 "error": "", "refreshed": True}
     finally:

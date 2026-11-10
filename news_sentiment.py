@@ -890,17 +890,21 @@ def validate_ai_output(out: dict, inp: dict) -> tuple:
     """
     problems = []
     valid_ids = {e["event_id"] for e in inp["events"]} | {a["event_id"] for a in inp["alerts"] if a["event_id"]}
-    allowed = set()
-    for v in (inp["nsi"], inp["momentum"], inp["K_incl"], inp["n_eff"], inp["A"], inp["omega"]):
-        if v is not None:
-            allowed |= {str(v), str(abs(v)), f"{v:+}" if isinstance(v, int) else str(v)}
-    for e in inp["events"]:
-        allowed |= set(re.findall(r"\d+(?:\.\d+)?", e["title"]))
-    allowed |= {"5", "3", "0", "1", "2", "100", "40", "15"}   # 公式說明可能用到的常數
+    # 允許的數字 = 輸入資料裡出現過的所有數字（NSI、動能、A、Ω、事件分數、重要性、新聞標題裡的數字…）
+    # 加上公式說明可能用到的常數。用數值比較，所以 0.5 和 0.50 視為同一個數字。
+    import json as _json
+    source_text = _json.dumps(inp, ensure_ascii=False, default=str)
+    for eid in valid_ids:                       # event_id 是雜湊碼，裡面的數字不算「數字」
+        source_text = source_text.replace(eid, " ")
+    allowed = {float(x) for x in re.findall(r"\d+(?:\.\d+)?", source_text)}
+    allowed |= {0.0, 1.0, 2.0, 3.0, 5.0, 15.0, 40.0, 100.0}
 
     def check_text(txt):
-        for num in re.findall(r"\d+(?:\.\d+)?", txt or ""):
-            if num not in allowed:
+        txt = txt or ""
+        for eid in valid_ids:                   # 文字裡引用 event_id 時，id 本身的數字不檢查
+            txt = txt.replace(eid, " ")
+        for num in re.findall(r"\d+(?:\.\d+)?", txt):
+            if float(num) not in allowed:
                 problems.append(f"出現輸入沒有提供的數字：{num}")
 
     for key in ("overall", "change"):
