@@ -48,7 +48,7 @@ ST_VERSION = tuple(int(x) for x in st.__version__.split(".")[:2])
 THEMES = {
     "dark": dict(
         bg="#0B0E14", chart="#141A23", toolbar="#171D27", border="#293241",
-        text="#F1F4F8", muted="#8994A6", up="#DF737B", down="#45B18A", accent="#91B4E8",
+        text="#F1F4F8", muted="#A9B4C4", up="#DF737B", down="#45B18A", accent="#91B4E8",
         grid="rgba(137,148,166,0.12)", hover="#1C2330",
     ),
     "light": dict(
@@ -174,7 +174,7 @@ div[data-testid="stHorizontalBlock"]:has(.qk-nav) label p { color: __muted__ !im
 .qk-up { color: __up__ !important; }
 .qk-down { color: __down__ !important; }
 .qk-flat { color: __muted__ !important; }
-.qk-meta { font-size: 13px; color: __muted__; margin-top: 6px; }
+.qk-meta { font-size: 14px; color: __muted__; margin-top: 6px; }
 .qk-stats { display: flex; flex-wrap: wrap; gap: 8px 40px; margin-top: 20px; }
 .qk-stat label { display: block; font-size: 12px; color: __muted__; margin-bottom: 2px; }
 .qk-stat b { font-size: 17px; font-weight: 500; color: __text__; font-variant-numeric: tabular-nums; }
