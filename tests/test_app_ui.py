@@ -19,6 +19,7 @@ def test_full_app_flow(monkeypatch):
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv("NEWS_DB_PATH", os.path.join(tempfile.mkdtemp(), "test.sqlite"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)   # UI 測試不呼叫真的 AI
     R = []
 
 

@@ -73,6 +73,7 @@ class AnthropicSummarizer:
 
     model = MODEL
     model_version = MODEL
+    display_name = "Claude Opus 5.5"
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -109,6 +110,96 @@ class AnthropicSummarizer:
         if not text:
             raise RuntimeError("模型沒有回傳文字")
         return json.loads(text)
+
+
+class OpenRouterSummarizer:
+    """
+    透過 OpenRouter（https://openrouter.ai）呼叫 Claude 產生摘要。
+    使用 OpenRouter 的 HTTP API（/api/v1/chat/completions），用 Python 標準函式庫送出，不需要額外套件。
+    模型 anthropic/claude-opus-5.5，要求回傳符合 SUMMARY_SCHEMA 的 JSON（structured outputs）。
+    """
+
+    model = "anthropic/claude-opus-5.5"
+    model_version = "openrouter:anthropic/claude-opus-5.5"
+    display_name = "Claude Opus 5.5 · OpenRouter"
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = (api_key or os.environ.get("OPENROUTER_API_KEY") or "").strip()
+        self.available = bool(self.api_key)
+        self.reason = "" if self.available else "尚未設定 OPENROUTER_API_KEY"
+
+    def build_request(self, inp: dict) -> dict:
+        """組出送給 OpenRouter 的 JSON（單獨拆出來，方便測試）"""
+        return {
+            "model": self.model,
+            "max_tokens": 4000,
+            "reasoning": {"effort": "low"},
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "news_summary", "strict": True, "schema": SUMMARY_SCHEMA}},
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(inp, ensure_ascii=False, default=str)},
+            ],
+        }
+
+    def parse_response(self, data: dict) -> dict:
+        """從 OpenRouter 的回應取出 JSON 摘要；任何異常都丟出錯誤（不偽造結果）"""
+        if "error" in data:
+            err = data["error"]
+            raise RuntimeError(f"OpenRouter 錯誤：{err.get('message', err) if isinstance(err, dict) else err}")
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError("OpenRouter 沒有回傳結果")
+        choice = choices[0]
+        finish = choice.get("finish_reason")
+        if finish == "length":
+            raise RuntimeError("摘要輸出被截斷")
+        if finish in ("content_filter", "refusal"):
+            raise RuntimeError("模型拒絕產生摘要")
+        content = (choice.get("message") or {}).get("content")
+        if isinstance(content, list):   # 有些模型會回傳分段的內容
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if not content:
+            raise RuntimeError("模型沒有回傳文字")
+        return json.loads(content)
+
+    def generate(self, inp: dict) -> dict:
+        import urllib.error
+        import urllib.request
+        body = json.dumps(self.build_request(inp), ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(self.url, data=body, method="POST", headers={
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "X-Title": "Stock News Sentiment",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+            if e.code == 401:
+                raise RuntimeError("OpenRouter 金鑰無效（401），請檢查 Secrets 裡的 OPENROUTER_API_KEY") from None
+            if e.code == 402:
+                raise RuntimeError("OpenRouter 帳戶餘額不足（402）") from None
+            if e.code == 429:
+                raise RuntimeError("OpenRouter 請求太頻繁（429），請稍後再試") from None
+            raise RuntimeError(f"OpenRouter HTTP {e.code}：{detail}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"連不上 OpenRouter：{e.reason}") from None
+        return self.parse_response(data)
+
+
+def pick_summarizer(openrouter_key: str | None = None, anthropic_key: str | None = None):
+    """有 OPENROUTER_API_KEY 優先用 OpenRouter；否則用 Anthropic 官方 API；都沒有就回傳未啟用的 provider"""
+    orouter = OpenRouterSummarizer(openrouter_key)
+    if orouter.available:
+        return orouter
+    anth = AnthropicSummarizer(anthropic_key)
+    if anth.available:
+        return anth
+    anth.reason = "尚未設定 OPENROUTER_API_KEY 或 ANTHROPIC_API_KEY"
+    return anth
 
 
 def get_summary(store, provider, ticker: str, inp: dict, evset: str, snapshot_id: str,

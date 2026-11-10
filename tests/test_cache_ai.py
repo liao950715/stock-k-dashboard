@@ -122,7 +122,8 @@ def test_ai_output_with_invented_number_is_rejected(store, calendar):
     assert out["kind"] == "rule" and "87" in out["error"]
 
 
-def test_no_provider_is_labelled_rule_based(store, calendar):
+def test_no_provider_is_labelled_rule_based(store, calendar, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _, _, _, inp, events = _analysis(calendar)
     p = ai_summary.AnthropicSummarizer(api_key="")
     assert p.available is False
@@ -205,3 +206,95 @@ def test_momentum_from_snapshots(store, calendar):
 
 def date_of(ts):
     return ts.date()
+
+
+# ---------------------------------------------------------------- OpenRouter
+import io
+import json
+import urllib.error
+
+
+def test_openrouter_preferred_over_anthropic(monkeypatch):
+    # 測試不能受電腦上真的環境變數影響
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    p = ai_summary.pick_summarizer("sk-or-test", "sk-ant-test")
+    assert isinstance(p, ai_summary.OpenRouterSummarizer) and p.available
+    assert isinstance(ai_summary.pick_summarizer(None, "sk-ant-test"), ai_summary.AnthropicSummarizer)
+    none = ai_summary.pick_summarizer(None, None)
+    assert none.available is False and "OPENROUTER_API_KEY" in none.reason
+
+
+def test_openrouter_request_uses_structured_output():
+    req = ai_summary.OpenRouterSummarizer("sk-or-test").build_request({"nsi": 30, "events": []})
+    assert req["model"] == "anthropic/claude-opus-5.5"
+    assert req["response_format"]["type"] == "json_schema"
+    assert req["response_format"]["json_schema"]["schema"] == ai_summary.SUMMARY_SCHEMA
+    assert req["messages"][0]["role"] == "system" and req["messages"][1]["role"] == "user"
+
+
+def test_openrouter_parse_response_cases():
+    p = ai_summary.OpenRouterSummarizer("sk-or-test")
+    good = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"overall": "x"})}}]}
+    assert p.parse_response(good) == {"overall": "x"}
+    parts = {"choices": [{"finish_reason": "stop", "message": {"content": [{"type": "text", "text": '{"a": 1}'}]}}]}
+    assert p.parse_response(parts) == {"a": 1}
+    for bad, msg in [({"error": {"message": "boom"}}, "boom"),
+                     ({"choices": []}, "沒有回傳"),
+                     ({"choices": [{"finish_reason": "length", "message": {"content": "{"}}]}, "截斷"),
+                     ({"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}, "拒絕")]:
+        with pytest.raises(RuntimeError, match=msg):
+            p.parse_response(bad)
+
+
+class _FakeResp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_openrouter_full_summary_flow_with_mocked_http(store, calendar, monkeypatch):
+    _, _, _, inp, events = _analysis(calendar)
+    ids = [e["event_id"] for e in inp["events"]]
+    content = {"overall": f"新聞情緒指數為 {inp['nsi']}", "change": "趨勢資料不足",
+               "positives": [{"text": "營收創新高", "event_ids": ids[:1]}], "negatives": [], "risks": [],
+               "limitations": ["只依據標題"]}
+    sent = {}
+
+    def fake_urlopen(req, timeout=0):
+        sent["url"], sent["auth"] = req.full_url, req.headers.get("Authorization")
+        sent["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(json.dumps({"choices": [{"finish_reason": "stop",
+                                                  "message": {"content": json.dumps(content, ensure_ascii=False)}}]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    p = ai_summary.OpenRouterSummarizer("sk-or-test")
+    out = _get(store, p, inp, events)
+    assert out["kind"] == "ai" and out["content"] == content
+    assert sent["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert sent["auth"] == "Bearer sk-or-test"
+    assert sent["body"]["model"] == "anthropic/claude-opus-5.5"
+    # 第二次（rerun）不再呼叫
+    sent.clear()
+    assert _get(store, p, inp, events)["refreshed"] is False and not sent
+
+
+def test_openrouter_http_errors_fall_back(store, calendar, monkeypatch):
+    _, _, _, inp, events = _analysis(calendar)
+
+    def raise_401(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"error":"bad key"}'))
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_401)
+    out = _get(store, ai_summary.OpenRouterSummarizer("sk-or-bad"), inp, events)
+    assert out["kind"] == "rule" and "401" in out["error"]
+
+
+@pytest.mark.network
+def test_openrouter_real_endpoint_rejects_fake_key():
+    """真的連到 OpenRouter，用假金鑰：預期回 401（不會產生費用），確認網址與錯誤處理正確"""
+    p = ai_summary.OpenRouterSummarizer("sk-or-v1-this-is-not-a-real-key")
+    with pytest.raises(RuntimeError, match="401|金鑰無效"):
+        p.generate({"nsi": 0, "events": [], "alerts": []})

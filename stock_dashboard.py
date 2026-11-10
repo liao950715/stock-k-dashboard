@@ -723,13 +723,18 @@ def calendar_days(is_tw):
 
 
 def get_summarizer():
-    """AI 摘要：有 ANTHROPIC_API_KEY（Streamlit secrets 或環境變數）才啟用"""
-    key = None
-    try:
-        key = st.secrets.get("ANTHROPIC_API_KEY")
-    except Exception:
-        key = None
-    return ai_summary.AnthropicSummarizer(api_key=key)
+    """
+    AI 摘要：讀 Streamlit Secrets（或環境變數）裡的金鑰
+      OPENROUTER_API_KEY → 透過 OpenRouter 呼叫 Claude（優先）
+      ANTHROPIC_API_KEY  → 直接呼叫 Anthropic Claude API
+    都沒有就不啟用，畫面顯示規則式摘要。
+    """
+    def secret(name):
+        try:
+            return st.secrets.get(name)
+        except Exception:
+            return None
+    return ai_summary.pick_summarizer(secret("OPENROUTER_API_KEY"), secret("ANTHROPIC_API_KEY"))
 
 
 def news_analysis(symbol, code, name, is_tw, query):
@@ -1180,7 +1185,7 @@ elif page == "相關新聞":
     force = st.session_state.pop(f"force_summary_{symbol}", False)
     summary = ai_summary.get_summary(get_store(), summarizer, symbol, inp, info["event_version_set"],
                                      info["snapshot_id"], info["data_cutoff"], rule_sum, force=force)
-    kind_txt = {"ai": f"AI 生成（{summarizer.model}）", "ai_stale": "AI 摘要（已過期，最新一次更新失敗）",
+    kind_txt = {"ai": f"AI 生成（{getattr(summarizer, 'display_name', summarizer.model)}）", "ai_stale": "AI 摘要（已過期，最新一次更新失敗）",
                 "rule": "規則式摘要（非 AI 生成）"}[summary["kind"]]
     gen_at = pd.Timestamp(summary["generated_at"]).tz_convert("Asia/Taipei").strftime("%m/%d %H:%M")
     cut_at = pd.Timestamp(summary["data_cutoff"]).tz_convert("Asia/Taipei").strftime("%m/%d %H:%M")

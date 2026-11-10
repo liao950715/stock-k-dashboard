@@ -9,7 +9,7 @@
 | `news_sentiment.py` | 純計算：規則式分類、交易日對齊、事件去重與版本、權重與 40% 上限、收縮 NSI、n_eff / A / Ω、敏感度、穩健程度、遲滯標籤、動能、警示、規則式摘要、AI 輸入與輸出驗證 |
 | `news_store.py` | SQLite 儲存與四層快取（L1～L4）、每日快照、查詢紀錄 |
 | `news_pipeline.py` | 串接流程：存檔 → 分類 → 事件 → 計算 → 快照 → 動能；趨勢資料；證交所休市日 |
-| `ai_summary.py` | AI 摘要：Claude API provider、觸發 / 快取 / 鎖 / 冷卻、失敗回退 |
+| `ai_summary.py` | AI 摘要：OpenRouter 與 Anthropic 兩種 provider、觸發 / 快取 / 鎖 / 冷卻、失敗回退 |
 | `stock_dashboard.py` | 新聞分頁 UI（A～E 區塊）與走勢圖下方的新聞預覽 |
 | `tests/` | 60 個測試（數學、事件、時間、AI 與快取、UI 整合） |
 
@@ -66,8 +66,11 @@
 * 同一股票同時只允許一個生成（鎖），其他請求先顯示快取
 * AI 只解釋程式提供的數字；輸出用 JSON schema，程式端驗證 event_id 與數字，不通過視為失敗
 * 失敗：有舊摘要 → 顯示並標示「已過期」；沒有 → 顯示規則式摘要並標示「非 AI 生成」
-* 模型：`claude-opus-5-5`，`effort: low`，啟用 server-side fallback（`fallbacks: "default"`）
-* 啟用方式：在 Streamlit Cloud 的 App settings → Secrets 加入 `ANTHROPIC_API_KEY = "..."`（會產生 API 費用）
+* Provider（依 Streamlit Secrets 自動選擇，OpenRouter 優先）：
+  * `OPENROUTER_API_KEY` → OpenRouter `anthropic/claude-opus-5.5`（HTTP API、structured outputs JSON schema、`reasoning.effort = low`）
+  * `ANTHROPIC_API_KEY` → Anthropic 官方 API `claude-opus-5-5`（`effort: low`，啟用 server-side fallback）
+* 啟用方式：Streamlit Cloud → App settings → Secrets 加入其中一個金鑰（會產生 API 費用，每次摘要約 0.02～0.04 美元）
+* 錯誤對應：401 金鑰無效、402 餘額不足、429 太頻繁、逾時 / 連線失敗 → 都視為失敗並回退，不偽造摘要
 
 ## 7. 測試（`python -m pytest tests`）
 
@@ -76,10 +79,10 @@
 | `test_math.py` | 22 | 0 / 1 / 2 / 3+ 事件、權重全 0、全中性 / 全多 / 全空、完全抵銷、集中度上限（單一 / 多個 / 不可行）、時間衰減邊界、相關性門檻、標籤與遲滯、動能、端到端 NSI 手算核對、少量事件穩健程度 |
 | `test_events.py` | 12 | 重複報導、轉載、獨立來源、不同季度、相同標題不同時間、更正版本、否認、來源矛盾、傳聞、官方公告、相關性、五級情緒 |
 | `test_time.py` | 10 | 週五盤後 / 週一盤前、盤前盤中盤後、週末、國定假日、非交易日、時區、未來日期、不可使用未來新聞、過期排除 |
-| `test_cache_ai.py` | 15 | 不重複呼叫、重大事件更新、prompt 版本、過期摘要、API 失敗（有 / 無快取）、不存在 event_id、編造數字、未啟用、並行請求、冷卻、分類快取與模型版本、L1 去重、趨勢狀態區分、5 日動能 |
+| `test_cache_ai.py` | 21 | 不重複呼叫、重大事件更新、prompt 版本、過期摘要、API 失敗（有 / 無快取）、不存在 event_id、編造數字、未啟用、並行請求、冷卻、分類快取與模型版本、L1 去重、趨勢狀態區分、5 日動能、OpenRouter（優先順序、請求格式、回應解析、HTTP 錯誤、完整流程、真實端點假金鑰 401） |
 | `test_app_ui.py` | 1（約 50 項檢查） | 實際執行整個網頁：搜尋、K 線、均線、副圖、主題、分頁、新聞頁 A～E 區塊、篩選、淺色模式（需網路；Streamlit 1.32 略過） |
 
-結果：Streamlit 1.67 → 60 通過；Streamlit 1.32 → 59 通過、1 略過。
+結果：Streamlit 1.67 → 66 通過；Streamlit 1.32 → 65 通過、1 略過。
 
 ## 8. 完成狀態
 
@@ -91,7 +94,7 @@
 | 每日快照、5 日動能、7 / 30 日趨勢 | 已完成；需要每天實際累積資料才會出現 |
 | 重大事件警示 | 已完成並測試 |
 | 四層快取 | 已完成並測試 |
-| AI 摘要（觸發、驗證、回退） | 程式完成並用假 provider 測試；**真實 API 未呼叫過**，未設定金鑰時不啟用 |
+| AI 摘要（觸發、驗證、回退） | 已完成；以模擬 provider 與模擬 HTTP 測試，並在雲端以 OpenRouter 金鑰實際驗證 |
 | 新聞分頁 UI | 已完成，深 / 淺色與 1440、1920 寬度檢查過 |
 
 ## 9. 已知限制
