@@ -846,7 +846,7 @@ def rule_based_summary(result: dict, mom: dict, alerts: list) -> dict:
 # ---------------------------------------------------------------------
 # 十四、AI 摘要：輸入資料、觸發指紋、輸出驗證
 # ---------------------------------------------------------------------
-SUMMARY_PROMPT_VERSION = "summary-prompt-1.0"
+SUMMARY_PROMPT_VERSION = "summary-prompt-1.1"
 
 
 def summary_input(ticker: str, name: str, result: dict, mom: dict, alerts: list, shown_label: str) -> dict:

@@ -1,6 +1,6 @@
 # 新聞情緒量化分析 V2.1：實作紀錄
 
-版本：公式 `nsi-2.1.0`、參數 `params-2.1.0`、分類 `rule-based / rules-2.1.2`、摘要 prompt `summary-prompt-1.0`
+版本：公式 `nsi-2.1.0`、參數 `params-2.1.0`、分類 `rule-based / rules-2.1.2`、摘要 prompt `summary-prompt-1.1`
 
 ## 1. 檔案
 
